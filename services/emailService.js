@@ -1,12 +1,23 @@
 const nodemailer = require('nodemailer');
 
-// Configuración del transportador de email
+// Configuración del transportador de email CORREGIDA para Render
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com', // Especificar host directamente
+  port: 587, // Puerto 587 con STARTTLS (funciona mejor en Render)
+  secure: false, // false para port 587, true para 465
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASSWORD
-  }
+  },
+  // Configuración adicional para Render
+  connectionTimeout: 30000, // 30 segundos
+  greetingTimeout: 30000,
+  socketTimeout: 30000,
+  requireTLS: true, // Forzar TLS
+  tls: {
+    rejectUnauthorized: false // Permitir certificados auto-firmados
+  },
+  debug: true // Para ver logs detallados
 });
 
 // Función para enviar email de verificación
@@ -142,11 +153,19 @@ async function sendVerificationEmail(email, codigo) {
   };
 
   try {
+    console.log(`📧 Intentando enviar email a: ${email}`);
+    console.log(`🔑 Código: ${codigo}`);
+    
     const info = await transporter.sendMail(mailOptions);
     console.log('✅ Email de verificación enviado:', info.messageId);
-    return { success: true, messageId: info.messageId };
+    console.log('📨 Respuesta:', info.response);
+    return { success: true, messageId: info.messageId, response: info.response };
   } catch (error) {
-    console.error('❌ Error enviando email de verificación:', error);
+    console.error('❌ Error enviando email de verificación:', error.message);
+    console.error('🔧 Detalles técnicos:', {
+      code: error.code,
+      command: error.command
+    });
     throw error;
   }
 }
@@ -292,24 +311,37 @@ async function sendPasswordResetEmail(email, codigo) {
   };
 
   try {
+    console.log(`📧 Intentando enviar email de recuperación a: ${email}`);
     const info = await transporter.sendMail(mailOptions);
     console.log('✅ Email de recuperación enviado:', info.messageId);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('❌ Error enviando email de recuperación:', error);
+    console.error('❌ Error enviando email de recuperación:', error.message);
     throw error;
   }
 }
 
-// Función para verificar configuración del servicio
+// Función para verificar configuración del servicio MEJORADA
 async function verifyEmailConfig() {
   try {
+    console.log('🧪 Verificando configuración de email...');
+    console.log('📧 Usuario:', process.env.EMAIL_USER ? '✅ Configurado' : '❌ No configurado');
+    console.log('🔑 Contraseña:', process.env.EMAIL_PASSWORD ? '✅ Configurada' : '❌ No configurada');
+    
     await transporter.verify();
     console.log('✅ Configuración de email verificada correctamente');
+    console.log('�️ Servidor: smtp.gmail.com:587');
     return true;
   } catch (error) {
-    console.error('❌ Error en configuración de email:', error);
-    console.error('Detalles del error:', error.message);
+    console.error('❌ Error en configuración de email:', error.message);
+    console.error('🔧 Código de error:', error.code);
+    
+    if (error.code === 'EAUTH') {
+      console.error('👤 Problema de autenticación: Verifica EMAIL_USER y EMAIL_PASSWORD');
+    } else if (error.code === 'ECONNECTION') {
+      console.error('🌐 Problema de conexión: Render puede estar bloqueando el puerto');
+    }
+    
     return false;
   }
 }

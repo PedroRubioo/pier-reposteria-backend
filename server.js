@@ -104,11 +104,11 @@ async function startServer() {
     console.log('✅ MongoDB conectado exitosamente');
     
     // PROBAR EMAIL
-    if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
-      console.log('🧪 Probando configuración de email...');
-      const { verifyEmailConfig } = require('./services/emailService');
-      await verifyEmailConfig();
-    }
+if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL) {
+  console.log('🧪 Probando configuración de email...');
+  const { verifyEmailConfig } = require('./services/emailServiceBrevo');
+  await verifyEmailConfig();
+}
     
     // Iniciar servidor
     const server = app.listen(PORT, '0.0.0.0', () => {

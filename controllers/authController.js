@@ -1,7 +1,7 @@
 const { getDB } = require('../config/database');
 const Usuario = require('../models/Usuario');
 const jwt = require('jsonwebtoken');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/emailService');
+const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/emailServiceBrevo');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
 

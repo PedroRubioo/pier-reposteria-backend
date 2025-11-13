@@ -5,6 +5,12 @@ const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5000';
+
+console.log('🔐 Configuración Google OAuth:');
+console.log('   FRONTEND_URL:', FRONTEND_URL);
+console.log('   BACKEND_URL:', BACKEND_URL);
+console.log('   GOOGLE_CALLBACK_URL:', process.env.GOOGLE_CALLBACK_URL);
 
 // Ruta para iniciar autenticación con Google
 router.get('/google',
@@ -37,10 +43,12 @@ router.get('/google/callback',
       );
       
       console.log('✅ Login con Google exitoso:', user.email);
+      console.log('🔗 Redirigiendo a frontend:', FRONTEND_URL);
       
       // Redirigir al frontend con el token y datos del usuario
-      // Usamos query params para pasar los datos
       const redirectUrl = `${FRONTEND_URL}/auth/google/success?token=${token}&user=${encodeURIComponent(JSON.stringify(user))}`;
+      
+      console.log('📍 URL de redirección:', redirectUrl);
       
       res.redirect(redirectUrl);
       

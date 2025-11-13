@@ -4,15 +4,22 @@ const { getDB } = require('../config/database');
 const Usuario = require('../models/Usuario');
 const { ObjectId } = require('mongodb');
 
+console.log('🔐 Inicializando Google OAuth Strategy...');
+console.log('   Client ID:', process.env.GOOGLE_CLIENT_ID ? '✅ Configurado' : '❌ No configurado');
+console.log('   Callback URL:', process.env.GOOGLE_CALLBACK_URL);
+
 // Configurar estrategia de Google
 passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback',
+    callbackURL: process.env.GOOGLE_CALLBACK_URL,
     scope: ['profile', 'email']
   },
   async function(accessToken, refreshToken, profile, done) {
     try {
+      console.log('🔄 Procesando autenticación Google para:', profile.emails[0].value);
+      console.log('   Google ID:', profile.id);
+      
       const db = await getDB();
       
       // Buscar si el usuario ya existe por Google ID
@@ -21,6 +28,7 @@ passport.use(new GoogleStrategy({
       });
 
       if (usuarioDoc) {
+        console.log('✅ Usuario existente encontrado por Google ID');
         // Usuario existe, actualizar último acceso
         await db.collection('Usuarios').updateOne(
           { _id: usuarioDoc._id },
@@ -37,13 +45,14 @@ passport.use(new GoogleStrategy({
       });
 
       if (usuarioDoc) {
+        console.log('✅ Usuario existente encontrado por email, vinculando Google');
         // Usuario existe con ese email, vincular cuenta de Google
         await db.collection('Usuarios').updateOne(
           { _id: usuarioDoc._id },
           { 
             $set: { 
               googleId: profile.id,
-              emailVerificado: true, // Google ya verificó el email
+              emailVerificado: true,
               ultimoAcceso: new Date()
             } 
           }
@@ -56,22 +65,21 @@ passport.use(new GoogleStrategy({
       }
 
       // Usuario nuevo, crear cuenta
+      console.log('👤 Creando nuevo usuario con Google OAuth');
       const nuevoUsuario = new Usuario({
         nombre: profile.name.givenName || profile.displayName.split(' ')[0],
         apellido: profile.name.familyName || profile.displayName.split(' ').slice(1).join(' ') || 'Usuario',
         email: profile.emails[0].value,
-        password: 'google-oauth-' + profile.id, // Password temporal (no se usará)
-        telefono: '0000000000', // Temporal, se puede pedir después
+        password: 'google-oauth-' + profile.id,
+        telefono: '0000000000',
         rol: 'cliente',
         googleId: profile.id,
-        emailVerificado: true, // Google ya verificó el email
+        emailVerificado: true,
         activo: true,
         fechaRegistro: new Date(),
         ultimoAcceso: new Date()
       });
 
-      // No necesitamos hashear la password para cuentas de Google
-      // pero lo hacemos por compatibilidad con el modelo
       await nuevoUsuario.hashPassword();
 
       // Guardar en base de datos
@@ -111,5 +119,7 @@ passport.deserializeUser(async (id, done) => {
     done(error, null);
   }
 });
+
+console.log('✅ Google OAuth Strategy configurado correctamente');
 
 module.exports = passport;

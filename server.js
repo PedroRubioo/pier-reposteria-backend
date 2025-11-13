@@ -1,13 +1,18 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const session = require('express-session');
 const { connectDB } = require('./config/database');
 
-// Cargar variables de entorno
+// Cargar variables de entorno PRIMERO
 dotenv.config();
+
+// AHORA SÍ cargar Passport (después de dotenv)
+const passport = require('./config/passport');
 
 // Crear app de Express
 const app = express();
+
 
 // CORS para producción
 const allowedOrigins = [
@@ -33,6 +38,25 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ============================================
+// NUEVOS MIDDLEWARES PARA GOOGLE OAUTH
+// ============================================
+// Configurar sesión (necesario para Passport)
+app.use(session({
+  secret: process.env.JWT_SECRET || 'pierreposteria_secret_key_2025',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production', // true en producción
+    maxAge: 24 * 60 * 60 * 1000 // 24 horas
+  }
+}));
+
+// Inicializar Passport
+app.use(passport.initialize());
+app.use(passport.session());
+// ============================================
+
 // Logging de requests
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -51,7 +75,10 @@ app.get('/api/render-health', (req, res) => {
 
 // Rutas
 const authRoutes = require('./routes/authRoutes');
+const googleAuthRoutes = require('./routes/googleAuthRoutes'); // ← NUEVO
+
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', googleAuthRoutes); // ← NUEVO - Rutas de Google OAuth
 
 // Ruta de prueba
 app.get('/', (req, res) => {
@@ -104,11 +131,11 @@ async function startServer() {
     console.log('✅ MongoDB conectado exitosamente');
     
     // PROBAR EMAIL
-if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL) {
-  console.log('🧪 Probando configuración de email...');
-  const { verifyEmailConfig } = require('./services/emailServiceBrevo');
-  await verifyEmailConfig();
-}
+    if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL) {
+      console.log('🧪 Probando configuración de email...');
+      const { verifyEmailConfig } = require('./services/emailServiceBrevo');
+      await verifyEmailConfig();
+    }
     
     // Iniciar servidor
     const server = app.listen(PORT, '0.0.0.0', () => {
@@ -118,6 +145,7 @@ if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL) {
       console.log(`🚀  Servidor corriendo en puerto ${PORT}`);
       console.log(`🌍  Host: 0.0.0.0`);
       console.log(`⚙️   Ambiente: ${process.env.NODE_ENV}`);
+      console.log(`🔐  Google OAuth: ${process.env.GOOGLE_CLIENT_ID ? 'Configurado' : 'No configurado'}`); // ← NUEVO
       console.log('═══════════════════════════════════════════');
     });
 

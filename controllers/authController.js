@@ -2,31 +2,76 @@ const { getDB } = require('../config/database');
 const Usuario = require('../models/Usuario');
 const jwt = require('jsonwebtoken');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/emailServiceBrevo');
+const { 
+  isValidEmail, 
+  isStrongPassword, 
+  getPasswordRequirementsMessage,
+  isValidName,
+  isValidPhone,
+  containsXSS,
+  containsNoSQLInjection 
+} = require('../middleware/validation');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
+
+// 🔒 SEGURIDAD: Validar y sanitizar datos de registro
+function validateRegistrationData(data) {
+  const errors = [];
+  
+  // Validar nombre
+  if (!data.nombre || !isValidName(data.nombre)) {
+    errors.push('El nombre debe contener solo letras y tener entre 2 y 50 caracteres');
+  }
+  
+  // Validar apellido
+  if (!data.apellido || !isValidName(data.apellido)) {
+    errors.push('El apellido debe contener solo letras y tener entre 2 y 50 caracteres');
+  }
+  
+  // Validar email
+  if (!data.email || !isValidEmail(data.email)) {
+    errors.push('El email no es válido');
+  }
+  
+  // Validar contraseña fuerte
+  if (!data.password) {
+    errors.push('La contraseña es requerida');
+  } else if (!isStrongPassword(data.password)) {
+    const message = getPasswordRequirementsMessage(data.password);
+    errors.push(message);
+  }
+  
+  // Validar teléfono
+  if (!data.telefono || !isValidPhone(data.telefono)) {
+    errors.push('El teléfono debe tener exactamente 10 dígitos');
+  }
+  
+  // Detectar XSS
+  const fieldsToCheck = [data.nombre, data.apellido, data.email, data.telefono];
+  if (fieldsToCheck.some(field => containsXSS(field))) {
+    errors.push('Se detectaron caracteres no permitidos en los datos');
+  }
+  
+  // Detectar NoSQL injection
+  if (fieldsToCheck.some(field => containsNoSQLInjection(field))) {
+    errors.push('Se detectaron patrones sospechosos en los datos');
+  }
+  
+  return errors;
+}
 
 // Registrar nuevo usuario con verificación de email
 async function register(req, res) {
   try {
     const { nombre, apellido, email, password, telefono, rol } = req.body;
 
-    // Crear instancia de usuario
-    const nuevoUsuario = new Usuario({
-      nombre,
-      apellido,
-      email,
-      password,
-      telefono,
-      rol: rol || 'cliente'
-    });
-
-    // Validar datos
-    const errores = nuevoUsuario.validate();
-    if (errores.length > 0) {
+    // 🔒 VALIDACIÓN DE SEGURIDAD
+    const validationErrors = validateRegistrationData(req.body);
+    if (validationErrors.length > 0) {
       return res.status(400).json({
         success: false,
         message: 'Errores de validación',
-        errors: errores
+        errors: validationErrors
       });
     }
 
@@ -43,6 +88,16 @@ async function register(req, res) {
       });
     }
 
+    // Crear instancia de usuario
+    const nuevoUsuario = new Usuario({
+      nombre,
+      apellido,
+      email,
+      password,
+      telefono,
+      rol: rol || 'cliente'
+    });
+
     // Hashear contraseña
     await nuevoUsuario.hashPassword();
 
@@ -55,27 +110,24 @@ async function register(req, res) {
     // Enviar email de verificación
     try {
       await sendVerificationEmail(email, codigoVerificacion);
-      console.log(`📧 Código de verificación enviado a ${email}: ${codigoVerificacion}`);
+      console.log(`✅ Código de verificación enviado a ${email}`);
     } catch (emailError) {
-      console.error('Error enviando email:', emailError);
+      console.error('❌ Error enviando email:', emailError.message);
       // Continuamos aunque falle el email
     }
 
-    // Respuesta exitosa
+    // Respuesta exitosa (NO incluir código en producción)
     res.status(201).json({
       success: true,
       message: 'Usuario registrado exitosamente. Por favor verifica tu correo electrónico.',
-      email: email,
-      // SOLO PARA DESARROLLO - QUITAR EN PRODUCCIÓN
-      codigoVerificacion: process.env.NODE_ENV === 'development' ? codigoVerificacion : undefined
+      email: email
     });
 
   } catch (error) {
-    console.error('Error en registro:', error);
+    console.error('❌ Error en registro:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al registrar usuario',
-      error: error.message
+      message: 'Error al registrar usuario'
     });
   }
 }
@@ -89,6 +141,14 @@ async function verifyEmail(req, res) {
       return res.status(400).json({
         success: false,
         message: 'Email y código son requeridos'
+      });
+    }
+
+    // 🔒 Validar formato de email
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email no válido'
       });
     }
 
@@ -146,11 +206,10 @@ async function verifyEmail(req, res) {
     });
 
   } catch (error) {
-    console.error('Error en verificación de email:', error);
+    console.error('❌ Error en verificación de email:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al verificar email',
-      error: error.message
+      message: 'Error al verificar email'
     });
   }
 }
@@ -160,10 +219,10 @@ async function resendVerificationCode(req, res) {
   try {
     const { email } = req.body;
 
-    if (!email) {
+    if (!email || !isValidEmail(email)) {
       return res.status(400).json({
         success: false,
-        message: 'Email es requerido'
+        message: 'Email válido es requerido'
       });
     }
 
@@ -205,24 +264,21 @@ async function resendVerificationCode(req, res) {
     // Enviar email
     try {
       await sendVerificationEmail(email, nuevoCodigoVerificacion);
-      console.log(`📧 Nuevo código de verificación enviado a ${email}: ${nuevoCodigoVerificacion}`);
+      console.log(`✅ Nuevo código enviado a ${email}`);
     } catch (emailError) {
-      console.error('Error enviando email:', emailError);
+      console.error('❌ Error enviando email:', emailError.message);
     }
 
     res.json({
       success: true,
-      message: 'Código de verificación reenviado',
-      // SOLO PARA DESARROLLO
-      codigoVerificacion: process.env.NODE_ENV === 'development' ? nuevoCodigoVerificacion : undefined
+      message: 'Código de verificación reenviado'
     });
 
   } catch (error) {
-    console.error('Error reenviando código:', error);
+    console.error('❌ Error reenviando código:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al reenviar código',
-      error: error.message
+      message: 'Error al reenviar código'
     });
   }
 }
@@ -236,6 +292,14 @@ async function login(req, res) {
       return res.status(400).json({
         success: false,
         message: 'Email y contraseña son requeridos'
+      });
+    }
+
+    // 🔒 Validar email
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email no válido'
       });
     }
 
@@ -304,11 +368,10 @@ async function login(req, res) {
     });
 
   } catch (error) {
-    console.error('Error en login:', error);
+    console.error('❌ Error en login:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al iniciar sesión',
-      error: error.message
+      message: 'Error al iniciar sesión'
     });
   }
 }
@@ -338,11 +401,10 @@ async function getProfile(req, res) {
     });
 
   } catch (error) {
-    console.error('Error obteniendo perfil:', error);
+    console.error('❌ Error obteniendo perfil:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener perfil',
-      error: error.message
+      message: 'Error al obtener perfil'
     });
   }
 }
@@ -352,10 +414,10 @@ async function requestPasswordReset(req, res) {
   try {
     const { email } = req.body;
 
-    if (!email) {
+    if (!email || !isValidEmail(email)) {
       return res.status(400).json({
         success: false,
-        message: 'Email es requerido'
+        message: 'Email válido es requerido'
       });
     }
 
@@ -364,8 +426,8 @@ async function requestPasswordReset(req, res) {
       email: email.toLowerCase()
     });
 
+    // 🔒 SEGURIDAD: No revelar si el usuario existe
     if (!usuarioDoc) {
-      // Por seguridad, no revelamos si el email existe o no
       return res.json({
         success: true,
         message: 'Si el email existe, recibirás un código de recuperación'
@@ -391,24 +453,21 @@ async function requestPasswordReset(req, res) {
     // Enviar email con el código
     try {
       await sendPasswordResetEmail(email, codigoRecuperacion);
-      console.log(`📧 Código de recuperación enviado a ${email}: ${codigoRecuperacion}`);
+      console.log(`✅ Código de recuperación enviado a ${email}`);
     } catch (emailError) {
-      console.error('Error enviando email de recuperación:', emailError);
+      console.error('❌ Error enviando email de recuperación:', emailError.message);
     }
 
     res.json({
       success: true,
-      message: 'Si el email existe, recibirás un código de recuperación',
-      // SOLO PARA DESARROLLO - QUITAR EN PRODUCCIÓN
-      codigo: process.env.NODE_ENV === 'development' ? codigoRecuperacion : undefined
+      message: 'Si el email existe, recibirás un código de recuperación'
     });
 
   } catch (error) {
-    console.error('Error solicitando recuperación:', error);
+    console.error('❌ Error solicitando recuperación:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al solicitar recuperación de contraseña',
-      error: error.message
+      message: 'Error al solicitar recuperación de contraseña'
     });
   }
 }
@@ -425,10 +484,20 @@ async function resetPassword(req, res) {
       });
     }
 
-    if (nuevaPassword.length < 6) {
+    // 🔒 Validar email
+    if (!isValidEmail(email)) {
       return res.status(400).json({
         success: false,
-        message: 'La contraseña debe tener al menos 6 caracteres'
+        message: 'Email no válido'
+      });
+    }
+
+    // 🔒 Validar contraseña fuerte
+    if (!isStrongPassword(nuevaPassword)) {
+      const message = getPasswordRequirementsMessage(nuevaPassword);
+      return res.status(400).json({
+        success: false,
+        message: message
       });
     }
 
@@ -473,11 +542,38 @@ async function resetPassword(req, res) {
     });
 
   } catch (error) {
-    console.error('Error restableciendo contraseña:', error);
+    console.error('❌ Error restableciendo contraseña:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Error al restablecer contraseña',
-      error: error.message
+      message: 'Error al restablecer contraseña'
+    });
+  }
+}
+
+// 🔒 Cerrar sesión e invalidar token
+async function logout(req, res) {
+  try {
+    const token = req.token; // Viene del middleware verifyToken
+    const { tokenBlacklist } = require('../middleware/tokenBlacklist');
+    const jwt = require('jsonwebtoken');
+
+    // Decodificar token para obtener expiración
+    const decoded = jwt.decode(token);
+    const expiresAt = decoded.exp * 1000; // Convertir a milliseconds
+
+    // Agregar token a la blacklist
+    tokenBlacklist.add(token, expiresAt);
+
+    res.json({
+      success: true,
+      message: 'Sesión cerrada exitosamente'
+    });
+
+  } catch (error) {
+    console.error('❌ Error en logout:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al cerrar sesión'
     });
   }
 }
@@ -489,5 +585,6 @@ module.exports = {
   login,
   getProfile,
   requestPasswordReset,
-  resetPassword
+  resetPassword,
+  logout // ✅ NUEVO
 };

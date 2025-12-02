@@ -31,7 +31,7 @@ app.use(securityHeadersMiddleware);
 
 // CORS configuración segura para producción
 const allowedOrigins = [
-  'https://pier-reposteria.vercel.app',
+  'https://pierreposteria-web.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173'
 ];

@@ -46,6 +46,12 @@ function sanitizeObject(obj) {
  */
 function sanitizeRequestMiddleware(req, res, next) {
   try {
+    // 🔧 EXCEPCIÓN: No sanitizar el callback de Google OAuth
+    // El código de autorización de Google contiene caracteres especiales que no deben ser escapados
+    if (req.path === '/api/auth/google/callback' || req.path.includes('/api/auth/google')) {
+      return next();
+    }
+
     if (req.body) {
       req.body = sanitizeObject(req.body);
     }

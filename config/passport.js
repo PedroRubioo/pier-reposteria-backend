@@ -12,7 +12,9 @@ console.log('   Callback URL:', process.env.GOOGLE_CALLBACK_URL);
 passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: process.env.GOOGLE_CALLBACK_URL,
+    // 🔧 CORREGIDO: Agregar fallback si GOOGLE_CALLBACK_URL no está definida
+    callbackURL: process.env.GOOGLE_CALLBACK_URL || 
+                 `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/auth/google/callback`,
     scope: ['profile', 'email']
   },
   async function(accessToken, refreshToken, profile, done) {

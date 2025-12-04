@@ -40,7 +40,7 @@ router.post('/reset-password', authController.resetPassword);
 // 🔒 Obtener perfil del usuario
 router.get('/profile', verifyToken, authController.getProfile);
 
-// 🔒 Cerrar sesión (invalidar token) - NUEVO
+// 🔒 Cerrar sesión (invalidar token)
 router.post('/logout', verifyToken, authController.logout);
 
 module.exports = router;

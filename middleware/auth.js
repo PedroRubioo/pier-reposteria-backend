@@ -31,7 +31,7 @@ function verifyToken(req, res, next) {
     
     // Agregar datos del usuario al request
     req.user = decoded;
-    req.token = token; // Guardar token para posible logout
+    req.token = token; // 🔥 Guardar token para logout
     
     next();
   } catch (error) {

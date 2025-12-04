@@ -14,6 +14,10 @@ const {
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
 
+// 🔥 NUEVAS IMPORTACIONES PARA LOGOUT:
+const { tokenBlacklist } = require('../middleware/tokenBlacklist');
+const { SecureLogger } = require('../utils/secureLogger');
+
 // 🔒 SEGURIDAD: Validar y sanitizar datos de registro
 function validateRegistrationData(data) {
   const errors = [];
@@ -551,18 +555,33 @@ async function resetPassword(req, res) {
 }
 
 // 🔒 Cerrar sesión e invalidar token
-async function logout(req, res) {
+// Cerrar sesión (invalidar token) - NUEVO/ACTUALIZADO
+const logout = async (req, res) => {
   try {
-    const token = req.token; // Viene del middleware verifyToken
-    const { tokenBlacklist } = require('../middleware/tokenBlacklist');
-    const jwt = require('jsonwebtoken');
+    const token = req.token; // El token viene del middleware verifyToken
+    const user = req.user;   // Los datos del usuario vienen del token decodificado
 
-    // Decodificar token para obtener expiración
-    const decoded = jwt.decode(token);
-    const expiresAt = decoded.exp * 1000; // Convertir a milliseconds
+    // Obtener expiración del token (7 días desde ahora)
+    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
 
     // Agregar token a la blacklist
     tokenBlacklist.add(token, expiresAt);
+
+    // 🔥 LOG DETALLADO del logout
+    SecureLogger.auth('Logout', user.email, true, {
+      userId: user.userId,
+      rol: user.rol,
+      ip: req.ip,
+      userAgent: req.headers['user-agent']?.substring(0, 50),
+      tokenBlacklistSize: tokenBlacklist.size()
+    });
+
+    console.log('🔴 SESIÓN CERRADA:');
+    console.log(`   👤 Usuario: ${user.email}`);
+    console.log(`   🆔 ID: ${user.userId}`);
+    console.log(`   👔 Rol: ${user.rol}`);
+    console.log(`   🌐 IP: ${req.ip}`);
+    console.log(`   📊 Tokens en blacklist: ${tokenBlacklist.size()}`);
 
     res.json({
       success: true,
@@ -570,13 +589,13 @@ async function logout(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Error en logout:', error.message);
+    SecureLogger.error('Error en logout', error);
     res.status(500).json({
       success: false,
       message: 'Error al cerrar sesión'
     });
   }
-}
+};
 
 module.exports = {
   register,

@@ -1,12 +1,16 @@
+// PRIMERO: Cargar variables de entorno
+// ==========================================
+const dotenv = require('dotenv');
+dotenv.config();  // <-- AHORA SÍ, PRIMERO
+
+// ==========================================
+// Luego el resto de imports (ya con variables cargadas)
+// ==========================================
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const session = require('express-session');
-const helmet = require('helmet'); // Instalar: npm install helmet
-const { connectDB } = require('./config/database');
-
-// Cargar variables de entorno PRIMERO
-dotenv.config();
+const helmet = require('helmet');
+const { connectDB, pool } = require('./config/database');  // ← database.js YA tiene DATABASE_URL
 
 // 🔒 SEGURIDAD: Importar middlewares de seguridad
 const { sanitizeRequestMiddleware } = require('./middleware/validation');
@@ -14,26 +18,34 @@ const { rateLimitMiddleware } = require('./middleware/rateLimiting');
 const { securityHeadersMiddleware, getCSRFTokenEndpoint } = require('./middleware/securityHeaders');
 const { SecureLogger, requestLoggerMiddleware } = require('./utils/secureLogger');
 
-// Cargar Passport (después de dotenv)
+// Cargar Passport
 const passport = require('./config/passport');
+
 
 // Crear app de Express
 const app = express();
 
-// 🔒 SEGURIDAD: Helmet para headers adicionales de seguridad
+// ========================================
+// 🔒 MIDDLEWARES DE SEGURIDAD
+// ========================================
+
+// Helmet para headers adicionales de seguridad
 app.use(helmet({
   contentSecurityPolicy: false, // Lo manejamos custom en securityHeaders
   hsts: false // Lo manejamos custom
 }));
 
-// 🔒 SEGURIDAD: Headers de seguridad personalizados
+// Headers de seguridad personalizados
 app.use(securityHeadersMiddleware);
 
-// CORS configuración segura para producción
+// ========================================
+// CORS CONFIGURATION
+// ========================================
 const allowedOrigins = [
   'https://pier-reposteria.vercel.app',
   'http://localhost:3000',
-  'http://localhost:5173'
+  'http://localhost:5173',
+  'http://localhost:5174'
 ];
 
 app.use(cors({
@@ -53,28 +65,32 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token']
 }));
 
-// Middlewares básicos
-app.use(express.json({ limit: '10mb' })); // Limitar tamaño de payload
+// ========================================
+// MIDDLEWARES BÁSICOS
+// ========================================
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// 🔒 SEGURIDAD: Sanitización de inputs (ANTES de rate limiting)
+// 🔒 Sanitización de inputs
 app.use(sanitizeRequestMiddleware);
 
-// 🔒 SEGURIDAD: Rate limiting general
+// 🔒 Rate limiting general
 app.use(rateLimitMiddleware);
 
-// 🔒 SEGURIDAD: Logging seguro de requests
+// 🔒 Logging seguro de requests
 app.use(requestLoggerMiddleware);
 
-// Configurar sesión (necesario para Passport y CSRF)
+// ========================================
+// SESIÓN (para Passport y CSRF)
+// ========================================
 app.use(session({
   secret: process.env.JWT_SECRET || 'pierreposteria_secret_key_2025',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: process.env.NODE_ENV === 'production', // true en producción (HTTPS)
-    httpOnly: true, // 🔒 Previene acceso desde JavaScript
-    sameSite: 'strict', // 🔒 Protección CSRF
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'strict',
     maxAge: 24 * 60 * 60 * 1000 // 24 horas
   }
 }));
@@ -83,55 +99,92 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Health check para Render (DEBE ESTAR AL INICIO, sin middlewares de seguridad)
+// ========================================
+// HEALTH CHECKS (sin autenticación)
+// ========================================
+
+// Health check para Render (DEBE ESTAR AL INICIO)
 app.get('/api/render-health', (req, res) => {
   res.json({ 
     status: 'OK', 
     service: 'pier-reposteria-backend',
     timestamp: new Date(),
-    environment: process.env.NODE_ENV 
+    environment: process.env.NODE_ENV,
+    database: 'PostgreSQL Neon'
   });
 });
 
-// 🔒 SEGURIDAD: Endpoint para obtener token CSRF
+// Health check general
+app.get('/api/health', async (req, res) => {
+  try {
+    // Verificar conexión a Neon
+    const dbStatus = await pool.query('SELECT NOW() as time');
+    
+    res.json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date(),
+      environment: process.env.NODE_ENV,
+      database: {
+        connected: true,
+        type: 'PostgreSQL',
+        provider: 'Neon',
+        time: dbStatus.rows[0].time
+      },
+      security: {
+        https: process.env.NODE_ENV === 'production',
+        rateLimiting: true,
+        csrfProtection: true,
+        inputSanitization: true,
+        securityHeaders: true
+      }
+    });
+  } catch (error) {
+    res.json({
+      success: true,
+      status: 'degraded',
+      timestamp: new Date(),
+      environment: process.env.NODE_ENV,
+      database: {
+        connected: false,
+        error: error.message
+      }
+    });
+  }
+});
+
+// Endpoint para obtener token CSRF
 app.get('/api/csrf-token', getCSRFTokenEndpoint);
 
-// Rutas
+// ========================================
+// RUTAS
+// ========================================
 const authRoutes = require('./routes/authRoutes');
 const googleAuthRoutes = require('./routes/googleAuthRoutes');
+const backupRoutes = require('./routes/backupRoutes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', googleAuthRoutes);
-
-// Ruta de prueba
+app.use('/api/backups', backupRoutes);
+// ========================================
+// RUTA PRINCIPAL
+// ========================================
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: '� API de Pier Repostería funcionando correctamente',
-    version: '2.0.0',
+    message: '🍰 API de Pier Repostería funcionando correctamente',
+    version: '2.1.0',
     environment: process.env.NODE_ENV,
+    database: 'PostgreSQL Neon',
     security: '🔒 Enhanced Security Enabled'
   });
 });
 
-// Ruta de health check
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    status: 'healthy',
-    timestamp: new Date(),
-    environment: process.env.NODE_ENV,
-    security: {
-      https: process.env.NODE_ENV === 'production',
-      rateLimiting: true,
-      csrfProtection: true,
-      inputSanitization: true,
-      securityHeaders: true
-    }
-  });
-});
+// ========================================
+// MANEJO DE ERRORES
+// ========================================
 
-// 🔒 SEGURIDAD: Manejo de rutas no encontradas
+// 404 - Ruta no encontrada
 app.use((req, res) => {
   SecureLogger.warn('Route not found', {
     method: req.method,
@@ -145,7 +198,7 @@ app.use((req, res) => {
   });
 });
 
-// 🔒 SEGURIDAD: Manejo de errores global (sin exponer información sensible)
+// Error handler global
 app.use((err, req, res, next) => {
   SecureLogger.error('Server error', err);
   
@@ -156,83 +209,83 @@ app.use((err, req, res, next) => {
       message: 'Error interno del servidor'
     });
   } else {
-    // En desarrollo, enviar más detalles
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',
-      error: err.message
+      error: err.message,
+      stack: err.stack
     });
   }
 });
 
-// Puerto
+// ========================================
+// INICIAR SERVIDOR
+// ========================================
 const PORT = process.env.PORT || 10000;
 
-// Función para iniciar servidor
 async function startServer() {
   try {
-    SecureLogger.info('Iniciando servidor...');
+    SecureLogger.info('🚀 Iniciando servidor Pier Repostería...');
     
-    // Conectar a MongoDB
-    SecureLogger.info('Conectando a MongoDB...');
+    // Conectar a Neon PostgreSQL
+    SecureLogger.info('📡 Conectando a Neon PostgreSQL...');
     await connectDB();
-    SecureLogger.info('MongoDB conectado exitosamente');
     
     // Verificar configuración de email
     if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL) {
-      SecureLogger.info('Verificando configuración de email...');
+      SecureLogger.info('📧 Verificando configuración de email...');
       const { verifyEmailConfig } = require('./services/emailServiceBrevo');
       await verifyEmailConfig();
     } else {
-      SecureLogger.warn('Email no configurado (BREVO_API_KEY o BREVO_SENDER_EMAIL faltantes)');
+      SecureLogger.warn('⚠️ Email no configurado (BREVO_API_KEY o BREVO_SENDER_EMAIL faltantes)');
     }
     
     // Iniciar servidor
     const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log('╔══════════════════════════════════════════╗');
-      console.log('�  PIER REPOSTERÍA - API SERVER v2.0');
-      console.log('╠══════════════════════════════════════════╣');
-      console.log(`🚀  Servidor: http://0.0.0.0:${PORT}`);
-      console.log(`⚙️   Ambiente: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🔒  Seguridad: ACTIVADA`);
-      console.log(`   ├─ Rate Limiting: ✅`);
-      console.log(`   ├─ Input Sanitization: ✅`);
-      console.log(`   ├─ CSRF Protection: ✅`);
-      console.log(`   ├─ Security Headers: ✅`);
-      console.log(`   ├─ Secure Logging: ✅`);
-      console.log(`   └─ Login Attempt Blocking: ✅`);
-      console.log(`📧  Google OAuth: ${process.env.GOOGLE_CLIENT_ID ? '✅' : '❌'}`);
-      console.log('╚══════════════════════════════════════════╝');
+      console.log('\n╔══════════════════════════════════════════════╗');
+      console.log('║     🍰 PIER REPOSTERÍA - API SERVER v2.1    ║');
+      console.log('╠══════════════════════════════════════════════╣');
+      console.log(`║  🚀 Servidor: http://0.0.0.0:${PORT}           `);
+      console.log(`║  ⚙️  Ambiente: ${process.env.NODE_ENV || 'development'}           `);
+      console.log(`║  🗄️  Base de datos: PostgreSQL Neon ✅       `);
+      console.log('╠══════════════════════════════════════════════╣');
+      console.log('║  🔒 SEGURIDAD ACTIVADA:                       ║');
+      console.log('║     ├─ Rate Limiting: ✅                     ║');
+      console.log('║     ├─ Input Sanitization: ✅                ║');
+      console.log('║     ├─ CSRF Protection: ✅                   ║');
+      console.log('║     ├─ Security Headers: ✅                  ║');
+      console.log('║     ├─ Secure Logging: ✅                    ║');
+      console.log('║     └─ Login Attempt Blocking: ✅            ║');
+      console.log('╠══════════════════════════════════════════════╣');
+      console.log(`║  📧 Google OAuth: ${process.env.GOOGLE_CLIENT_ID ? '✅' : '❌'}                          ║`);
+      console.log('╚══════════════════════════════════════════════╝\n');
     });
 
-    // Para que Render detecte el servidor
-    server.on('listening', () => {
-      SecureLogger.info('Servidor activo y escuchando');
-    });
-
-    // 🔒 SEGURIDAD: Manejo de cierre graceful
+    // Manejo de cierre graceful
     process.on('SIGTERM', () => {
-      SecureLogger.info('SIGTERM recibido, cerrando servidor...');
+      SecureLogger.info('📴 SIGTERM recibido, cerrando servidor...');
       server.close(() => {
-        SecureLogger.info('Servidor cerrado correctamente');
+        SecureLogger.info('✅ Servidor cerrado correctamente');
         process.exit(0);
       });
     });
     
   } catch (error) {
-    SecureLogger.error('Error iniciando servidor', error);
+    SecureLogger.error('💥 Error iniciando servidor', error);
     process.exit(1);
   }
 }
 
-// 🔒 SEGURIDAD: Manejo de errores no capturados
+// ========================================
+// MANEJO DE ERRORES NO CAPTURADOS
+// ========================================
 process.on('uncaughtException', (error) => {
-  SecureLogger.error('Uncaught Exception', error);
+  SecureLogger.error('🔥 Uncaught Exception', error);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  SecureLogger.error('Unhandled Rejection', { reason, promise });
+  SecureLogger.error('🔥 Unhandled Rejection', { reason, promise });
   process.exit(1);
 });
 

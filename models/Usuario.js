@@ -1,148 +1,92 @@
-const { ObjectId } = require('mongodb');
+// models/Usuario.js
 const bcrypt = require('bcryptjs');
 
 class Usuario {
   constructor(data) {
-    this._id = data._id ? new ObjectId(data._id) : new ObjectId();
+    this.id = data.id;
     this.nombre = data.nombre;
     this.apellido = data.apellido;
     this.email = data.email;
-    this.password = data.password;
+    this.password_hash = data.password_hash;
     this.telefono = data.telefono;
-    this.rol = data.rol || 'cliente'; // cliente, empleado, gerencia, direccion_general
-    this.activo = data.activo !== undefined ? data.activo : true;
-    this.fechaRegistro = data.fechaRegistro || new Date();
-    this.ultimoAcceso = data.ultimoAcceso || null;
-    
-    // Nuevos campos para verificación de email
-    this.emailVerificado = data.emailVerificado || false;
-    this.codigoVerificacion = data.codigoVerificacion || null;
-    this.codigoVerificacionExpira = data.codigoVerificacionExpira || null;
-    
-    // Campos para recuperación de contraseña
-    this.codigoRecuperacion = data.codigoRecuperacion || null;
-    this.codigoRecuperacionExpira = data.codigoRecuperacionExpira || null;
-    
-    // Campo para Google OAuth
-    this.googleId = data.googleId || null;
+    this.rol = data.rol;
+    this.activo = data.activo;
+    this.created_at = data.created_at;
+    this.updated_at = data.updated_at;
+    this.email_verificado = data.email_verificado || false;
+    this.google_id = data.google_id;
+    this.ultimo_acceso = data.ultimo_acceso;
   }
 
-  // Validar datos del usuario
-  validate() {
-    const errors = [];
-
-    if (!this.nombre || this.nombre.trim().length < 2) {
-      errors.push('El nombre debe tener al menos 2 caracteres');
-    }
-
-    if (!this.apellido || this.apellido.trim().length < 2) {
-      errors.push('El apellido debe tener al menos 2 caracteres');
-    }
-
-    if (!this.email || !this.isValidEmail(this.email)) {
-      errors.push('Email inválido');
-    }
-
-    // La contraseña no es requerida si es login con Google
-    if (!this.googleId && (!this.password || this.password.length < 6)) {
-      errors.push('La contraseña debe tener al menos 6 caracteres');
-    }
-
-    if (!this.telefono || this.telefono.length < 10) {
-      errors.push('El teléfono debe tener al menos 10 dígitos');
-    }
-
-    const rolesValidos = ['cliente', 'empleado', 'gerencia', 'direccion_general'];
-    if (!rolesValidos.includes(this.rol)) {
-      errors.push('Rol inválido');
-    }
-
-    return errors;
-  }
-
-  // Validar formato de email
-  isValidEmail(email) {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
-  }
-
-  // Hashear contraseña
-  async hashPassword() {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-  }
-
-  // Comparar contraseña
+  // Comparar contraseña (bcrypt)
   async comparePassword(candidatePassword) {
-    return await bcrypt.compare(candidatePassword, this.password);
+    return await bcrypt.compare(candidatePassword, this.password_hash);
   }
 
-  // Generar código de verificación de 6 dígitos
-  generateVerificationCode() {
-    this.codigoVerificacion = Math.floor(100000 + Math.random() * 900000).toString();
-    this.codigoVerificacionExpira = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
-    return this.codigoVerificacion;
+  // Hashear contraseña (para registro)
+  static async hashPassword(password) {
+    const salt = await bcrypt.genSalt(10);
+    return await bcrypt.hash(password, salt);
   }
 
-  // Generar código de recuperación de 6 dígitos
-  generateRecoveryCode() {
-    this.codigoRecuperacion = Math.floor(100000 + Math.random() * 900000).toString();
-    this.codigoRecuperacionExpira = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
-    return this.codigoRecuperacion;
-  }
-
-  // Verificar si el código de verificación es válido
-  isVerificationCodeValid(codigo) {
-    return this.codigoVerificacion === codigo && 
-           this.codigoVerificacionExpira && 
-           new Date() < this.codigoVerificacionExpira;
-  }
-
-  // Verificar si el código de recuperación es válido
-  isRecoveryCodeValid(codigo) {
-    return this.codigoRecuperacion === codigo && 
-           this.codigoRecuperacionExpira && 
-           new Date() < this.codigoRecuperacionExpira;
-  }
-
-  // Limpiar códigos de verificación
-  clearVerificationCodes() {
-    this.codigoVerificacion = null;
-    this.codigoVerificacionExpira = null;
-  }
-
-  // Limpiar códigos de recuperación
-  clearRecoveryCodes() {
-    this.codigoRecuperacion = null;
-    this.codigoRecuperacionExpira = null;
-  }
-
-  // Convertir a objeto plano (sin password)
+  // Convertir a JSON (sin datos sensibles)
   toJSON() {
-    const { password, codigoVerificacion, codigoRecuperacion, ...userWithoutSensitiveData } = this;
-    return userWithoutSensitiveData;
-  }
-
-  // Convertir a objeto para base de datos
-  toDocument() {
     return {
-      _id: this._id,
+      id: this.id,
       nombre: this.nombre,
       apellido: this.apellido,
-      email: this.email.toLowerCase(),
-      password: this.password,
+      email: this.email,
       telefono: this.telefono,
       rol: this.rol,
       activo: this.activo,
-      fechaRegistro: this.fechaRegistro,
-      ultimoAcceso: this.ultimoAcceso,
-      emailVerificado: this.emailVerificado,
-      codigoVerificacion: this.codigoVerificacion,
-      codigoVerificacionExpira: this.codigoVerificacionExpira,
-      codigoRecuperacion: this.codigoRecuperacion,
-      codigoRecuperacionExpira: this.codigoRecuperacionExpira,
-      googleId: this.googleId
+      emailVerificado: this.email_verificado,
+      googleId: this.google_id,
+      fechaRegistro: this.created_at,
+      ultimoAcceso: this.ultimo_acceso
     };
+  }
+
+  // Buscar usuario por email
+  static async findByEmail(pool, email) {
+    const result = await pool.query(
+      'SELECT * FROM core.tblusuarios WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    return result.rows[0] ? new Usuario(result.rows[0]) : null;
+  }
+
+  // Buscar usuario por ID
+  static async findById(pool, id) {
+    const result = await pool.query(
+      'SELECT * FROM core.tblusuarios WHERE id = $1',
+      [id]
+    );
+    return result.rows[0] ? new Usuario(result.rows[0]) : null;
+  }
+
+  // Crear nuevo usuario
+  static async create(pool, userData) {
+    const { nombre, apellido, email, password, telefono, rol = 'cliente' } = userData;
+    
+    const password_hash = await this.hashPassword(password);
+    
+    const result = await pool.query(
+      `INSERT INTO core.tblusuarios 
+       (nombre, apellido, email, password_hash, telefono, rol, activo, email_verificado, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+       RETURNING *`,
+      [nombre, apellido, email.toLowerCase(), password_hash, telefono, rol, true, false]
+    );
+    
+    return result.rows[0] ? new Usuario(result.rows[0]) : null;
+  }
+
+  // Actualizar último acceso
+  static async updateLastAccess(pool, id) {
+    await pool.query(
+      'UPDATE core.tblusuarios SET ultimo_acceso = NOW() WHERE id = $1',
+      [id]
+    );
   }
 }
 

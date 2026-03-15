@@ -1,0 +1,186 @@
+# =============================================================================
+# PIER REPOSTERÍA BACKEND - PIPELINE DE SEGURIDAD (SAST)
+# Archivo: .github/workflows/security-pipeline.yml
+#
+# Docente: Ing. Ana María Felipe Redondo
+# Alumnos: Pedro Rubio Ángeles (20230074) / Alexander Hernández Meza (20230106)
+#
+# Jobs:
+#   Job 1 — SAST  → Semgrep + ESLint Security + npm audit
+#   Job 2 — REPORTE HTML Visual
+#   Job 3 — RESUMEN FINAL
+# =============================================================================
+
+name: "Pier Reposteria Backend - Pipeline de Seguridad"
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+# =============================================================================
+# JOB 1 — SAST
+# =============================================================================
+  sast:
+    name: "SAST - Semgrep + ESLint + npm audit"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: "SAST [1/3] Semgrep - Analisis de codigo fuente"
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/nodejs
+            p/express
+            p/jwt
+            p/secrets
+            p/sql-injection
+        continue-on-error: true
+
+      - name: "SAST [1/3] Semgrep - Exportar resultados JSON"
+        run: |
+          pip install semgrep --quiet
+          semgrep \
+            --config=p/nodejs \
+            --config=p/express \
+            --config=p/jwt \
+            --config=p/secrets \
+            --config=p/sql-injection \
+            --json \
+            --output=sast-semgrep-results.json \
+            --exclude=node_modules \
+            . || true
+          python3 -c "
+          import json
+          with open('sast-semgrep-results.json') as f:
+            data = json.load(f)
+          results = data.get('results', [])
+          print(f'Total alertas Semgrep: {len(results)}')
+          for r in results:
+            sev = r['extra']['severity']
+            path = r['path']
+            line = r['start']['line']
+            rule = r['check_id'].split('.')[-1]
+            print(f'  [{sev}] {path}:{line} - {rule}')
+          " || true
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Instalar dependencias del backend
+        run: npm ci
+
+      - name: "SAST [2/3] ESLint Security Plugin - Backend Node.js"
+        run: |
+          npm install --save-dev eslint eslint-plugin-security 2>/dev/null || true
+          cat > .eslint-security.json << 'EOF'
+          {
+            "env": { "node": true, "es2021": true },
+            "plugins": ["security"],
+            "rules": {
+              "security/detect-object-injection": "warn",
+              "security/detect-non-literal-regexp": "warn",
+              "security/detect-unsafe-regex": "warn",
+              "security/detect-child-process": "warn",
+              "security/detect-disable-mustache-escape": "error",
+              "security/detect-eval-with-expression": "error",
+              "security/detect-no-csrf-before-method-override": "error",
+              "security/detect-possible-timing-attacks": "warn",
+              "security/detect-pseudoRandomBytes": "warn",
+              "security/detect-non-literal-fs-filename": "warn"
+            }
+          }
+          EOF
+          npx eslint \
+            --config .eslint-security.json \
+            --ext .js \
+            --format json \
+            --output-file sast-eslint-results.json \
+            --ignore-pattern node_modules/ \
+            . || true
+          echo "ESLint completado."
+
+      - name: "SAST [3/3] npm audit - Dependencias vulnerables"
+        run: |
+          npm audit --json > sast-npm-audit.json 2>&1 || true
+          npm audit --audit-level=high || true
+
+      - name: Subir reportes SAST (JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports-json
+          path: |
+            sast-semgrep-results.json
+            sast-eslint-results.json
+            sast-npm-audit.json
+          retention-days: 30
+
+# =============================================================================
+# JOB 2 — REPORTE HTML VISUAL
+# =============================================================================
+  reporte-html:
+    name: "Reporte HTML Visual"
+    runs-on: ubuntu-latest
+    needs: sast
+    if: always()
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Descargar reportes SAST
+        uses: actions/download-artifact@v4
+        with:
+          name: sast-reports-json
+        continue-on-error: true
+
+      - name: Generar reporte HTML
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: python3 .github/scripts/generar_reporte.py
+
+      - name: Subir reporte HTML visual
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reporte-visual
+          path: sast-reporte-visual.html
+          retention-days: 30
+
+# =============================================================================
+# JOB 3 — RESUMEN FINAL
+# =============================================================================
+  resumen-final:
+    name: "Resumen del Pipeline de Seguridad"
+    runs-on: ubuntu-latest
+    needs: [sast, reporte-html]
+    if: always()
+
+    steps:
+      - name: Mostrar resumen consolidado
+        run: |
+          echo "======================================================"
+          echo "  PIER REPOSTERIA BACKEND - RESUMEN PIPELINE SAST"
+          echo "======================================================"
+          echo "  Commit : ${{ github.sha }}"
+          echo "  Rama   : ${{ github.ref_name }}"
+          echo "  Fecha  : $(date)"
+          echo "  Autor  : ${{ github.actor }}"
+          echo ""
+          echo "  Resultados:"
+          echo "  SAST (Semgrep + ESLint + npm audit) : ${{ needs.sast.result }}"
+          echo "  Reporte HTML Visual                 : ${{ needs.reporte-html.result }}"
+          echo ""
+          echo "  Artefactos en GitHub Actions > Artifacts:"
+          echo "    sast-reports-json / sast-reporte-visual"
+          echo "======================================================"

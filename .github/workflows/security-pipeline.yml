@@ -175,30 +175,7 @@ jobs:
           EOF
 
       - name: Crear agente IAST (iast-agent.js)
-        run: |
-          cat > iast-agent.js << 'EOF'
-          const { NodeSDK } = require('@opentelemetry/sdk-node');
-          const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-          const { ConsoleSpanExporter } = require('@opentelemetry/sdk-trace-base');
-
-          const sdk = new NodeSDK({
-            serviceName: 'pier-reposteria-iast',
-            traceExporter: new ConsoleSpanExporter(),
-            instrumentations: [
-              getNodeAutoInstrumentations({
-                '@opentelemetry/instrumentation-fs': { enabled: false },
-                '@opentelemetry/instrumentation-http': { enabled: true },
-                '@opentelemetry/instrumentation-express': { enabled: true },
-                '@opentelemetry/instrumentation-pg': { enabled: true },
-              })
-            ]
-          });
-
-          sdk.start();
-          console.log('[IAST] OpenTelemetry activo');
-          console.log('[IAST] Monitoreando: HTTP + Express + PostgreSQL');
-          process.on('SIGTERM', () => sdk.shutdown());
-          EOF
+        run: python3 .github/scripts/crear_agente_iast.py
 
       - name: Iniciar backend con agente IAST
         run: |

@@ -3,7 +3,10 @@ Crea iast-agent.js en la raiz del proyecto.
 Se usa desde el pipeline para evitar problemas de indentacion en heredocs YAML.
 """
 
-agente = """const { NodeSDK } = require('@opentelemetry/sdk-node');
+agente = """// Cargar variables de entorno PRIMERO antes que cualquier import
+require('dotenv').config();
+
+const { NodeSDK } = require('@opentelemetry/sdk-node');
 const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
 const { ConsoleSpanExporter } = require('@opentelemetry/sdk-trace-base');
 

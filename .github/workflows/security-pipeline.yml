@@ -190,6 +190,14 @@ jobs:
             sleep 2
           done
 
+      - name: Debug - Ver log del backend
+        if: always()
+        run: |
+          echo "=== CONTENIDO iast-runtime-log.txt ==="
+          cat iast-runtime-log.txt || echo "Archivo vacio o no existe"
+          echo "=== PROCESOS NODE CORRIENDO ==="
+          ps aux | grep node || echo "Ningun proceso node"
+
       - name: Verificar que el backend esta activo
         run: |
           HEALTH=$(curl -s http://localhost:3001/api/render-health)

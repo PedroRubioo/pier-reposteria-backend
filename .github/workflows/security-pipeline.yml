@@ -143,16 +143,14 @@ jobs:
             @opentelemetry/auto-instrumentations-node \
             @opentelemetry/sdk-trace-base
 
-      - name: Crear agente IAST (iast-agent.js)
-        run: python3 .github/scripts/crear_agente_iast.py
-
       - name: Iniciar backend con agente IAST
         env:
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
-          python3 -c "
-          import os
-          db = os.environ.get('NEON_DATABASE_URL', '')
+          python3 .github/scripts/crear_agente_iast.py
+          python3 - "$NEON_DATABASE_URL" << 'PYEOF'
+          import sys, os
+          db = sys.argv[1] if len(sys.argv) > 1 else ''
           lines = [
             'NODE_ENV=test',
             'PORT=3001',
@@ -169,8 +167,8 @@ jobs:
           ]
           with open('.env', 'w') as f:
               f.write('\n'.join(lines) + '\n')
-          print('.env creado. DATABASE_URL presente:', bool(db))
-          "
+          print(f'.env creado. DATABASE_URL presente: {bool(db)}')
+          PYEOF
           node --require ./iast-agent.js server.js > iast-runtime-log.txt 2>&1 &
           echo "Esperando que el backend arranque..."
           for i in {1..45}; do

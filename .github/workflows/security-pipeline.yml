@@ -155,30 +155,25 @@ jobs:
             @opentelemetry/auto-instrumentations-node \
             @opentelemetry/sdk-trace-base
 
-      - name: Configurar variables de entorno para CI
-        env:
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: |
-          cat > .env << EOF
-          NODE_ENV=test
-          PORT=3001
-          DATABASE_URL=${NEON_DATABASE_URL}
-          JWT_SECRET=ci_iast_jwt_secret_pier_2025
-          SESSION_SECRET=ci_iast_session_secret_pier_2025
-          STRIPE_SECRET_KEY=sk_test_placeholder
-          BREVO_API_KEY=placeholder
-          BREVO_SENDER_EMAIL=placeholder@pier.com
-          GOOGLE_CLIENT_ID=placeholder
-          GOOGLE_CLIENT_SECRET=placeholder
-          OTEL_SERVICE_NAME=pier-reposteria-iast
-          OTEL_TRACES_EXPORTER=console
-          EOF
-
       - name: Crear agente IAST (iast-agent.js)
         run: python3 .github/scripts/crear_agente_iast.py
 
       - name: Iniciar backend con agente IAST
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
+          export NODE_ENV=test
+          export PORT=3001
+          export DATABASE_URL=$NEON_DATABASE_URL
+          export JWT_SECRET=ci_iast_jwt_secret_pier_2025
+          export SESSION_SECRET=ci_iast_session_secret_pier_2025
+          export STRIPE_SECRET_KEY=sk_test_placeholder
+          export BREVO_API_KEY=placeholder
+          export BREVO_SENDER_EMAIL=placeholder@pier.com
+          export GOOGLE_CLIENT_ID=placeholder
+          export GOOGLE_CLIENT_SECRET=placeholder
+          export OTEL_SERVICE_NAME=pier-reposteria-iast
+          export OTEL_TRACES_EXPORTER=console
           node --require ./iast-agent.js server.js > iast-runtime-log.txt 2>&1 &
           echo "Esperando que el backend arranque..."
           for i in {1..45}; do

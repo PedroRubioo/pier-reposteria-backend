@@ -56,19 +56,7 @@ jobs:
             --output=sast-semgrep-results.json \
             --exclude=node_modules \
             . || true
-          python3 -c "
-          import json
-          with open('sast-semgrep-results.json') as f:
-            data = json.load(f)
-          results = data.get('results', [])
-          print(f'Total alertas Semgrep: {len(results)}')
-          for r in results:
-            sev = r['extra']['severity']
-            path = r['path']
-            line = r['start']['line']
-            rule = r['check_id'].split('.')[-1]
-            print(f'  [{sev}] {path}:{line} - {rule}')
-          " || true
+          python3 .github/scripts/parse_semgrep.py || true
 
       - name: Configurar Node.js
         uses: actions/setup-node@v4
@@ -162,18 +150,27 @@ jobs:
         env:
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
-          export NODE_ENV=test
-          export PORT=3001
-          export DATABASE_URL=$NEON_DATABASE_URL
-          export JWT_SECRET=ci_iast_jwt_secret_pier_2025
-          export SESSION_SECRET=ci_iast_session_secret_pier_2025
-          export STRIPE_SECRET_KEY=sk_test_placeholder
-          export BREVO_API_KEY=placeholder
-          export BREVO_SENDER_EMAIL=placeholder@pier.com
-          export GOOGLE_CLIENT_ID=placeholder
-          export GOOGLE_CLIENT_SECRET=placeholder
-          export OTEL_SERVICE_NAME=pier-reposteria-iast
-          export OTEL_TRACES_EXPORTER=console
+          python3 -c "
+          import os
+          db = os.environ.get('NEON_DATABASE_URL', '')
+          lines = [
+            'NODE_ENV=test',
+            'PORT=3001',
+            f'DATABASE_URL={db}',
+            'JWT_SECRET=ci_iast_jwt_secret_pier_2025',
+            'SESSION_SECRET=ci_iast_session_secret_pier_2025',
+            'STRIPE_SECRET_KEY=sk_test_placeholder',
+            'BREVO_API_KEY=placeholder',
+            'BREVO_SENDER_EMAIL=placeholder@pier.com',
+            'GOOGLE_CLIENT_ID=placeholder',
+            'GOOGLE_CLIENT_SECRET=placeholder',
+            'OTEL_SERVICE_NAME=pier-reposteria-iast',
+            'OTEL_TRACES_EXPORTER=console',
+          ]
+          with open('.env', 'w') as f:
+              f.write('\n'.join(lines) + '\n')
+          print('.env creado. DATABASE_URL presente:', bool(db))
+          "
           node --require ./iast-agent.js server.js > iast-runtime-log.txt 2>&1 &
           echo "Esperando que el backend arranque..."
           for i in {1..45}; do
@@ -276,16 +273,16 @@ jobs:
         run: |
           pkill -f "node --require ./iast-agent.js" || true
           sleep 2
-          echo "Trazas OpenTelemetry capturadas:"
+          echo "Total de lineas en log IAST:"
           wc -l iast-runtime-log.txt
-          echo "Primeras 100 lineas del log IAST:"
+          echo "--- Primeras 100 lineas ---"
           head -100 iast-runtime-log.txt
 
       - name: Generar reporte IAST
         env:
-          COMMIT_SHA: ${{ github.sha }}
-          BRANCH_NAME: ${{ github.ref_name }}
-          ACTOR_NAME: ${{ github.actor }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
         run: python3 .github/scripts/generar_reporte_iast.py
 
       - name: Subir artefactos IAST

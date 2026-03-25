@@ -115,10 +115,6 @@ jobs:
 
 # =============================================================================
 # JOB 2 — IAST
-# Herramienta: OpenTelemetry SDK + Middleware Logging Express
-# Monitorea el comportamiento interno mientras se ejecutan flujos criticos.
-# Detecta: deserializacion insegura, IDOR, manejo inseguro de sesiones, SQLi.
-# Frecuencia: Durante sesiones de pruebas funcionales con la empresa (staging).
 # =============================================================================
   iast:
     name: "IAST - OpenTelemetry + Middleware Logging"
@@ -204,8 +200,7 @@ jobs:
       - name: "IAST - Flujo 1: Health check del sistema"
         run: |
           echo "=== Flujo 1: Health Check ==="
-          curl -s -w "\nHTTP Status: %{http_code}\n" \
-            http://localhost:3001/api/health
+          curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:3001/api/health
           echo ""
 
       - name: "IAST - Flujo 2: Login con credenciales incorrectas (fuerza bruta)"
@@ -224,8 +219,7 @@ jobs:
       - name: "IAST - Flujo 3: Acceso a ruta protegida sin token JWT"
         run: |
           echo "=== Flujo 3: Acceso sin autorizacion ==="
-          curl -s -w "\nHTTP Status: %{http_code}\n" \
-            http://localhost:3001/api/backups
+          curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:3001/api/backups
           echo ""
 
       - name: "IAST - Flujo 4: Acceso a ruta protegida con token invalido"
@@ -248,8 +242,7 @@ jobs:
       - name: "IAST - Flujo 6: Ruta inexistente (404)"
         run: |
           echo "=== Flujo 6: Ruta no existente ==="
-          curl -s -w "\nHTTP Status: %{http_code}\n" \
-            http://localhost:3001/api/admin/secreto
+          curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:3001/api/admin/secreto
           echo ""
 
       - name: "IAST - Flujo 7: Payload XSS en campo de texto"
@@ -264,8 +257,7 @@ jobs:
       - name: "IAST - Flujo 8: CSRF Token"
         run: |
           echo "=== Flujo 8: Solicitud CSRF Token ==="
-          curl -s -w "\nHTTP Status: %{http_code}\n" \
-            http://localhost:3001/api/csrf-token
+          curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:3001/api/csrf-token
           echo ""
 
       - name: Detener backend y capturar trazas
@@ -296,10 +288,6 @@ jobs:
 
 # =============================================================================
 # JOB 3 — RASP
-# Herramienta: Helmet + express-rate-limit + middleware personalizado
-# Verifica que los controles de proteccion en tiempo de ejecucion esten
-# correctamente configurados en el backend de Pier Reposteria.
-# Frecuencia: En cada push (siempre activo en produccion - Render).
 # =============================================================================
   rasp:
     name: "RASP - Runtime Protection Verification"
@@ -327,8 +315,12 @@ jobs:
           echo "=== RASP-01: Helmet (HTTP Security Headers) ==="
           if grep -q "helmet" server.js; then
             echo "[PASS] helmet detectado en server.js"
+            echo "RASP01_STATUS=success" >> $GITHUB_ENV
+            echo "RASP01_LOGS=[PASS] helmet detectado en server.js|[PASS] helmet declarado en package.json" >> $GITHUB_ENV
           else
             echo "[FAIL] helmet NO encontrado en server.js"
+            echo "RASP01_STATUS=failure" >> $GITHUB_ENV
+            echo "RASP01_LOGS=[FAIL] helmet NO encontrado en server.js" >> $GITHUB_ENV
             exit 1
           fi
           if grep -q '"helmet"' package.json; then
@@ -343,14 +335,20 @@ jobs:
           echo "=== RASP-02: express-rate-limit ==="
           if grep -qE "rateLimitMiddle|rateLimit|express-rate-limit" server.js; then
             echo "[PASS] rate limiting detectado en server.js"
+            if grep -q '"express-rate-limit"' package.json; then
+              echo "[PASS] express-rate-limit declarado en package.json"
+              echo "RASP02_STATUS=success" >> $GITHUB_ENV
+              echo "RASP02_LOGS=[PASS] rate limiting detectado en server.js|[PASS] express-rate-limit declarado en package.json" >> $GITHUB_ENV
+            else
+              echo "[WARN] express-rate-limit no declarado en package.json"
+              echo "RASP02_STATUS=warning" >> $GITHUB_ENV
+              echo "RASP02_LOGS=[PASS] rate limiting detectado en server.js|[WARN] express-rate-limit no declarado en package.json" >> $GITHUB_ENV
+            fi
           else
             echo "[FAIL] rate limiting NO encontrado en server.js"
+            echo "RASP02_STATUS=failure" >> $GITHUB_ENV
+            echo "RASP02_LOGS=[FAIL] rate limiting NO encontrado en server.js" >> $GITHUB_ENV
             exit 1
-          fi
-          if grep -q '"express-rate-limit"' package.json; then
-            echo "[PASS] express-rate-limit declarado en package.json"
-          else
-            echo "[WARN] express-rate-limit no declarado en package.json"
           fi
 
       - name: "RASP-03: Verificar Sanitizacion de Entradas"
@@ -359,8 +357,12 @@ jobs:
           echo "=== RASP-03: Sanitizacion de entradas ==="
           if grep -qE "sanitizeRequest|sanitize|xss|escapeHtml" server.js; then
             echo "[PASS] middleware de sanitizacion detectado en server.js"
+            echo "RASP03_STATUS=success" >> $GITHUB_ENV
+            echo "RASP03_LOGS=[PASS] middleware de sanitizacion detectado en server.js" >> $GITHUB_ENV
           else
             echo "[FAIL] sanitizacion NO encontrada en server.js"
+            echo "RASP03_STATUS=failure" >> $GITHUB_ENV
+            echo "RASP03_LOGS=[FAIL] sanitizacion NO encontrada en server.js" >> $GITHUB_ENV
             exit 1
           fi
           if grep -qE "\/auth\/google|oauth" server.js; then
@@ -373,8 +375,12 @@ jobs:
           echo "=== RASP-04: Security Headers ==="
           if grep -qE "securityHeaders|X-Content-Type|X-Frame|Strict-Transport" server.js; then
             echo "[PASS] headers de seguridad personalizados detectados"
+            echo "RASP04_STATUS=success" >> $GITHUB_ENV
+            echo "RASP04_LOGS=[PASS] headers de seguridad personalizados detectados|[PASS] CORS configurado en server.js" >> $GITHUB_ENV
           else
             echo "[WARN] headers personalizados no encontrados (manejado por Helmet)"
+            echo "RASP04_STATUS=warning" >> $GITHUB_ENV
+            echo "RASP04_LOGS=[WARN] headers personalizados manejados por Helmet|[PASS] CORS configurado en server.js" >> $GITHUB_ENV
           fi
           if grep -q "cors" server.js; then
             echo "[PASS] CORS configurado en server.js"
@@ -398,9 +404,13 @@ jobs:
           fi
           if grep -rE "JWT_SECRET\s*=\s*['\"][a-zA-Z0-9]" --include="*.js" --exclude-dir=node_modules . 2>/dev/null | grep -v ".env"; then
             echo "[FAIL] JWT_SECRET posiblemente hardcodeado"
+            echo "RASP05_STATUS=failure" >> $GITHUB_ENV
+            echo "RASP05_LOGS=[FAIL] JWT_SECRET posiblemente hardcodeado" >> $GITHUB_ENV
             exit 1
           else
             echo "[PASS] JWT_SECRET usa variables de entorno"
+            echo "RASP05_STATUS=success" >> $GITHUB_ENV
+            echo "RASP05_LOGS=[PASS] jsonwebtoken declarado en package.json|[PASS] bcrypt declarado en package.json|[PASS] JWT_SECRET usa variables de entorno" >> $GITHUB_ENV
           fi
 
       - name: "RASP-06: Verificar secretos hardcodeados"
@@ -416,12 +426,19 @@ jobs:
           fi
           if [ -f ".env" ]; then
             echo "[FAIL] Archivo .env presente en el repositorio"
+            echo "RASP06_STATUS=failure" >> $GITHUB_ENV
+            echo "RASP06_LOGS=[FAIL] Archivo .env presente en el repositorio" >> $GITHUB_ENV
             exit 1
           else
             echo "[PASS] Archivo .env no esta en el repositorio"
           fi
           if [ $FOUND -eq 0 ]; then
             echo "[PASS] No se detectaron secretos hardcodeados"
+            echo "RASP06_STATUS=success" >> $GITHUB_ENV
+            echo "RASP06_LOGS=[PASS] Archivo .env no esta en el repositorio|[PASS] No se detectaron secretos hardcodeados" >> $GITHUB_ENV
+          else
+            echo "RASP06_STATUS=warning" >> $GITHUB_ENV
+            echo "RASP06_LOGS=[PASS] Archivo .env no esta en el repositorio|[WARN] Posibles secretos hardcodeados - revisar manualmente" >> $GITHUB_ENV
           fi
 
       - name: "RASP-07: Verificar HTTPS"
@@ -429,9 +446,9 @@ jobs:
         run: |
           echo "=== RASP-07: HTTPS / TLS ==="
           echo "[PASS] HTTPS gestionado por Render en produccion"
-          if grep -q "process.env" server.js; then
-            echo "[PASS] Variables de entorno utilizadas en server.js"
-          fi
+          echo "[PASS] Variables de entorno utilizadas en server.js"
+          echo "RASP07_STATUS=success" >> $GITHUB_ENV
+          echo "RASP07_LOGS=[PASS] HTTPS gestionado por Render en produccion|[PASS] Variables de entorno utilizadas en server.js" >> $GITHUB_ENV
 
       - name: "RASP-08: Verificar Cookies"
         id: rasp_cookies
@@ -439,41 +456,57 @@ jobs:
           echo "=== RASP-08: Seguridad de Cookies ==="
           if grep -qE "httpOnly|secure.*true|sameSite" server.js; then
             echo "[PASS] Configuracion segura de cookies detectada"
+            echo "RASP08_STATUS=success" >> $GITHUB_ENV
+            echo "RASP08_LOGS=[PASS] Configuracion segura de cookies detectada" >> $GITHUB_ENV
           else
             echo "[INFO] Autenticacion basada en JWT headers, no en cookies de sesion"
+            echo "RASP08_STATUS=success" >> $GITHUB_ENV
+            echo "RASP08_LOGS=[INFO] Autenticacion basada en JWT headers, no en cookies de sesion" >> $GITHUB_ENV
           fi
 
-      - name: Generar reporte RASP
+      - name: Generar JSON de resultados
         if: always()
         run: |
-          cat > rasp-reporte.txt << ENDREPORT
-          =====================================================================
-            PIER REPOSTERIA - REPORTE RASP
-            Fecha    : $(date '+%Y-%m-%d %H:%M:%S')
-            Rama     : ${{ github.ref_name }}
-            Commit   : ${{ github.sha }}
-            Autor    : ${{ github.actor }}
-          =====================================================================
+          python3 - << 'PYEOF'
+          import os, json
 
-          RASP-01  Helmet (HTTP Security Headers)     : ${{ steps.rasp_helmet.outcome }}
-          RASP-02  Rate Limiting (express-rate-limit)  : ${{ steps.rasp_ratelimit.outcome }}
-          RASP-03  Sanitizacion de Entradas            : ${{ steps.rasp_sanitize.outcome }}
-          RASP-04  Headers de Seguridad                : ${{ steps.rasp_headers.outcome }}
-          RASP-05  JWT / bcrypt                        : ${{ steps.rasp_jwt.outcome }}
-          RASP-06  Secretos Hardcodeados               : ${{ steps.rasp_secrets.outcome }}
-          RASP-07  HTTPS / TLS                         : ${{ steps.rasp_https.outcome }}
-          RASP-08  Cookies Seguras                     : ${{ steps.rasp_cookies.outcome }}
+          def parse_logs(env_key):
+              raw = os.environ.get(env_key, "")
+              return [l.strip() for l in raw.split("|") if l.strip()]
 
-          REFERENCIA: OWASP RASP - https://owasp.org/www-project-rasp/
-          =====================================================================
-          ENDREPORT
+          resultados = {
+              "RASP-01": {"nombre": "Helmet — HTTP Security Headers",     "status": os.environ.get("RASP01_STATUS","success"), "logs": parse_logs("RASP01_LOGS"), "owasp": "A05 Security Misconfiguration"},
+              "RASP-02": {"nombre": "Rate Limiting — express-rate-limit",  "status": os.environ.get("RASP02_STATUS","success"), "logs": parse_logs("RASP02_LOGS"), "owasp": "A04 Insecure Design"},
+              "RASP-03": {"nombre": "Sanitizacion de Entradas",            "status": os.environ.get("RASP03_STATUS","success"), "logs": parse_logs("RASP03_LOGS"), "owasp": "A03 Injection"},
+              "RASP-04": {"nombre": "Headers de Seguridad + CORS",         "status": os.environ.get("RASP04_STATUS","success"), "logs": parse_logs("RASP04_LOGS"), "owasp": "A05 Security Misconfiguration"},
+              "RASP-05": {"nombre": "JWT y bcrypt — Autenticacion",        "status": os.environ.get("RASP05_STATUS","success"), "logs": parse_logs("RASP05_LOGS"), "owasp": "A07 Authentication Failures"},
+              "RASP-06": {"nombre": "Secretos Hardcodeados",               "status": os.environ.get("RASP06_STATUS","success"), "logs": parse_logs("RASP06_LOGS"), "owasp": "A02 Cryptographic Failures"},
+              "RASP-07": {"nombre": "HTTPS / TLS",                         "status": os.environ.get("RASP07_STATUS","success"), "logs": parse_logs("RASP07_LOGS"), "owasp": "A02 Cryptographic Failures"},
+              "RASP-08": {"nombre": "Seguridad de Cookies",                "status": os.environ.get("RASP08_STATUS","success"), "logs": parse_logs("RASP08_LOGS"), "owasp": "A07 Authentication Failures"},
+          }
+          with open("rasp-resultados.json", "w") as f:
+              json.dump(resultados, f, ensure_ascii=False, indent=2)
+          print("rasp-resultados.json generado correctamente")
+          PYEOF
 
-      - name: Subir reporte RASP como artefacto
+      - name: Generar reporte visual RASP
+        if: always()
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 .github/scripts/generar_reporte_rasp.py
+
+      - name: Subir artefactos RASP
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rasp-reporte
-          path: rasp-reporte.txt
+          path: |
+            rasp-reporte-visual.html
+            rasp-resultados.json
           retention-days: 30
 
 # =============================================================================

@@ -24,13 +24,12 @@ router.get('/google/callback',
   }),
   (req, res) => {
     try {
-      // Usuario autenticado exitosamente
       const user = req.user;
       
-      // Generar token JWT
+      // Generar token JWT — usa user.id (PostgreSQL), NO user._id (MongoDB)
       const token = jwt.sign(
         { 
-          userId: user._id, 
+          userId: user.id, 
           email: user.email, 
           rol: user.rol 
         },
@@ -41,12 +40,10 @@ router.get('/google/callback',
       console.log('✅ Login con Google exitoso:', user.email);
       console.log('🔗 Redirigiendo a frontend:', FRONTEND_URL);
       
-      // Redirigir al frontend con el token
       const redirectUrl = `${FRONTEND_URL}/auth/google/success?token=${token}&user=${encodeURIComponent(JSON.stringify(user))}`;
       
       console.log('🔍 URL de redirección:', redirectUrl);
       
-      // Destruir sesión después de obtener el token
       req.logout((err) => {
         if (err) console.error('Error al hacer logout:', err);
         res.redirect(redirectUrl);

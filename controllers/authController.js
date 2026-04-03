@@ -1,609 +1,263 @@
-const { getDB } = require('../config/database');
+// controllers/authController.js — MIGRADO A POSTGRESQL (corregido al schema real)
+const { pool } = require('../config/database');
 const Usuario = require('../models/Usuario');
 const jwt = require('jsonwebtoken');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/emailServiceBrevo');
-const { 
-  isValidEmail, 
-  isStrongPassword, 
-  getPasswordRequirementsMessage,
-  isValidName,
-  isValidPhone,
-  containsXSS,
-  containsNoSQLInjection 
-} = require('../middleware/validation');
+const { isValidEmail, isStrongPassword, getPasswordRequirementsMessage, isValidName, isValidPhone, containsXSS, containsNoSQLInjection } = require('../middleware/validation');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
-
-// 🔥 NUEVAS IMPORTACIONES PARA LOGOUT:
 const { tokenBlacklist } = require('../middleware/tokenBlacklist');
 const { SecureLogger } = require('../utils/secureLogger');
 
-// 🔒 SEGURIDAD: Validar y sanitizar datos de registro
 function validateRegistrationData(data) {
   const errors = [];
-  
-  // Validar nombre
-  if (!data.nombre || !isValidName(data.nombre)) {
-    errors.push('El nombre debe contener solo letras y tener entre 2 y 50 caracteres');
-  }
-  
-  // Validar apellido
-  if (!data.apellido || !isValidName(data.apellido)) {
-    errors.push('El apellido debe contener solo letras y tener entre 2 y 50 caracteres');
-  }
-  
-  // Validar email
-  if (!data.email || !isValidEmail(data.email)) {
-    errors.push('El email no es válido');
-  }
-  
-  // Validar contraseña fuerte
-  if (!data.password) {
-    errors.push('La contraseña es requerida');
-  } else if (!isStrongPassword(data.password)) {
-    const message = getPasswordRequirementsMessage(data.password);
-    errors.push(message);
-  }
-  
-  // Validar teléfono
-  if (!data.telefono || !isValidPhone(data.telefono)) {
-    errors.push('El teléfono debe tener exactamente 10 dígitos');
-  }
-  
-  // Detectar XSS
-  const fieldsToCheck = [data.nombre, data.apellido, data.email, data.telefono];
-  if (fieldsToCheck.some(field => containsXSS(field))) {
-    errors.push('Se detectaron caracteres no permitidos en los datos');
-  }
-  
-  // Detectar NoSQL injection
-  if (fieldsToCheck.some(field => containsNoSQLInjection(field))) {
-    errors.push('Se detectaron patrones sospechosos en los datos');
-  }
-  
+  if (!data.nombre || !isValidName(data.nombre)) errors.push('El nombre debe contener solo letras y tener entre 2 y 50 caracteres');
+  if (!data.apellido || !isValidName(data.apellido)) errors.push('El apellido debe contener solo letras y tener entre 2 y 50 caracteres');
+  if (!data.email || !isValidEmail(data.email)) errors.push('El email no es válido');
+  if (!data.password) errors.push('La contraseña es requerida');
+  else if (!isStrongPassword(data.password)) errors.push(getPasswordRequirementsMessage(data.password));
+  if (!data.telefono || !isValidPhone(data.telefono)) errors.push('El teléfono debe tener exactamente 10 dígitos');
+  const fields = [data.nombre, data.apellido, data.email, data.telefono];
+  if (fields.some(f => containsXSS(f))) errors.push('Se detectaron caracteres no permitidos');
+  if (fields.some(f => containsNoSQLInjection(f))) errors.push('Se detectaron patrones sospechosos');
   return errors;
 }
 
-// Registrar nuevo usuario con verificación de email
+function generarCodigo6Digitos() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// ── REGISTRO ──
 async function register(req, res) {
   try {
     const { nombre, apellido, email, password, telefono, rol } = req.body;
-
-    // 🔒 VALIDACIÓN DE SEGURIDAD
     const validationErrors = validateRegistrationData(req.body);
-    if (validationErrors.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Errores de validación',
-        errors: validationErrors
-      });
-    }
+    if (validationErrors.length > 0) return res.status(400).json({ success: false, message: 'Errores de validación', errors: validationErrors });
 
-    // Verificar si el email ya existe
-    const db = await getDB();
-    const usuarioExistente = await db.collection('Usuarios').findOne({
-      email: email.toLowerCase()
-    });
+    const existente = await pool.query('SELECT id FROM core.tblusuarios WHERE email = $1', [email.toLowerCase()]);
+    if (existente.rows.length > 0) return res.status(400).json({ success: false, message: 'El email ya está registrado' });
 
-    if (usuarioExistente) {
-      return res.status(400).json({
-        success: false,
-        message: 'El email ya está registrado'
-      });
-    }
+    const password_hash = await Usuario.hashPassword(password);
+    const resultado = await pool.query(
+      `INSERT INTO core.tblusuarios (nombre, apellido, email, password_hash, telefono, rol, activo, email_verificado, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,true,false,NOW(),NOW()) RETURNING id, email`,
+      [nombre, apellido, email.toLowerCase(), password_hash, telefono, rol || 'cliente']
+    );
+    const nuevoUsuario = resultado.rows[0];
 
-    // Crear instancia de usuario
-    const nuevoUsuario = new Usuario({
-      nombre,
-      apellido,
-      email,
-      password,
-      telefono,
-      rol: rol || 'cliente'
-    });
+    const codigo = generarCodigo6Digitos();
+    const expiraAt = new Date(Date.now() + 15 * 60 * 1000);
 
-    // Hashear contraseña
-    await nuevoUsuario.hashPassword();
+    await pool.query(
+      `INSERT INTO core.tblcodigos_verificacion (usuario_id, email, codigo, tipo, usado, expira_at, created_at)
+       VALUES ($1, $2, $3, 'registro', false, $4, NOW())`,
+      [nuevoUsuario.id, email.toLowerCase(), codigo, expiraAt]
+    );
 
-    // Generar código de verificación
-    const codigoVerificacion = nuevoUsuario.generateVerificationCode();
+    try { await sendVerificationEmail(email, codigo); console.log(`✅ Código enviado a ${email}`); }
+    catch (e) { console.error('❌ Error enviando email:', e.message); }
 
-    // Guardar en la base de datos
-    const resultado = await db.collection('Usuarios').insertOne(nuevoUsuario.toDocument());
-
-    // Enviar email de verificación
-    try {
-      await sendVerificationEmail(email, codigoVerificacion);
-      console.log(`✅ Código de verificación enviado a ${email}`);
-    } catch (emailError) {
-      console.error('❌ Error enviando email:', emailError.message);
-      // Continuamos aunque falle el email
-    }
-
-    // Respuesta exitosa (NO incluir código en producción)
-    res.status(201).json({
-      success: true,
-      message: 'Usuario registrado exitosamente. Por favor verifica tu correo electrónico.',
-      email: email
-    });
-
+    res.status(201).json({ success: true, message: 'Usuario registrado. Verifica tu correo electrónico.', email });
   } catch (error) {
     console.error('❌ Error en registro:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al registrar usuario'
-    });
+    res.status(500).json({ success: false, message: 'Error al registrar usuario' });
   }
 }
 
-// Verificar email con código
+// ── VERIFICAR EMAIL ──
 async function verifyEmail(req, res) {
   try {
     const { email, codigo } = req.body;
+    if (!email || !codigo) return res.status(400).json({ success: false, message: 'Email y código son requeridos' });
+    if (!isValidEmail(email)) return res.status(400).json({ success: false, message: 'Email no válido' });
 
-    if (!email || !codigo) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email y código son requeridos'
-      });
-    }
+    const userResult = await pool.query('SELECT * FROM core.tblusuarios WHERE email = $1', [email.toLowerCase()]);
+    if (userResult.rows.length === 0) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    const usuarioDoc = userResult.rows[0];
+    if (usuarioDoc.email_verificado) return res.status(400).json({ success: false, message: 'El email ya está verificado' });
 
-    // 🔒 Validar formato de email
-    if (!isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email no válido'
-      });
-    }
+    const codigoResult = await pool.query(
+      `SELECT id FROM core.tblcodigos_verificacion
+       WHERE email = $1 AND codigo = $2 AND tipo = 'registro' AND usado = false AND expira_at > NOW()
+       ORDER BY created_at DESC LIMIT 1`,
+      [email.toLowerCase(), codigo]
+    );
+    if (codigoResult.rows.length === 0) return res.status(400).json({ success: false, message: 'Código inválido o expirado' });
 
-    const db = await getDB();
-    const usuarioDoc = await db.collection('Usuarios').findOne({
-      email: email.toLowerCase()
+    await pool.query('UPDATE core.tblcodigos_verificacion SET usado = true WHERE id = $1', [codigoResult.rows[0].id]);
+    await pool.query('UPDATE core.tblusuarios SET email_verificado = true, updated_at = NOW() WHERE id = $1', [usuarioDoc.id]);
+
+    // Notificación de bienvenida + email
+    const { notificarConEmail } = require('../services/notificacionHelper');
+    await notificarConEmail({
+      usuario_id: usuarioDoc.id,
+      tipo: 'sistema',
+      titulo: '¡Bienvenido a Pier Repostería!',
+      mensaje: `Hola ${usuarioDoc.nombre}, tu cuenta ha sido verificada. Ya puedes explorar nuestros productos y hacer pedidos.`,
+      email: usuarioDoc.email,
+      nombre: usuarioDoc.nombre,
+      asunto: '🍰 ¡Bienvenido a Pier Repostería!',
+      contenidoHtml: `
+        <h2>¡Bienvenido, ${usuarioDoc.nombre}!</h2>
+        <p>Tu cuenta ha sido verificada exitosamente. Ahora puedes:</p>
+        <div class="highlight-box">
+          <p><strong>✅ Explorar</strong> nuestro catálogo de productos artesanales</p>
+          <p><strong>🛒 Hacer pedidos</strong> y pagar en línea</p>
+          <p><strong>🏪 Recoger</strong> en nuestra sucursal de Huejutla de Reyes</p>
+          <p><strong>⭐ Dejar reseñas</strong> sobre tus productos favoritos</p>
+        </div>
+        <p>¡Esperamos endulzar tus momentos!</p>
+      `
     });
 
-    if (!usuarioDoc) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
+    const token = jwt.sign({ userId: usuarioDoc.id, email: usuarioDoc.email, rol: usuarioDoc.rol }, JWT_SECRET, { expiresIn: '7d' });
     const usuario = new Usuario(usuarioDoc);
 
-    // Verificar si ya está verificado
-    if (usuario.emailVerificado) {
-      return res.status(400).json({
-        success: false,
-        message: 'El email ya está verificado'
-      });
-    }
-
-    // Verificar código
-    if (!usuario.isVerificationCodeValid(codigo)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Código inválido o expirado'
-      });
-    }
-
-    // Marcar como verificado y limpiar códigos
-    await db.collection('Usuarios').updateOne(
-      { email: email.toLowerCase() },
-      {
-        $set: { emailVerificado: true },
-        $unset: { codigoVerificacion: '', codigoVerificacionExpira: '' }
-      }
-    );
-
-    // Generar token JWT
-    const token = jwt.sign(
-      { userId: usuario._id, email: usuario.email, rol: usuario.rol },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Email verificado exitosamente',
-      token,
-      user: usuario.toJSON()
-    });
-
+    res.json({ success: true, message: 'Email verificado exitosamente', token, user: usuario.toJSON() });
   } catch (error) {
-    console.error('❌ Error en verificación de email:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al verificar email'
-    });
+    console.error('❌ Error verificando email:', error.message);
+    res.status(500).json({ success: false, message: 'Error al verificar email' });
   }
 }
 
-// Reenviar código de verificación
+// ── REENVIAR CÓDIGO ──
 async function resendVerificationCode(req, res) {
   try {
     const { email } = req.body;
+    if (!email || !isValidEmail(email)) return res.status(400).json({ success: false, message: 'Email válido es requerido' });
 
-    if (!email || !isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email válido es requerido'
-      });
-    }
+    const userResult = await pool.query('SELECT id, email_verificado FROM core.tblusuarios WHERE email = $1', [email.toLowerCase()]);
+    if (userResult.rows.length === 0) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    if (userResult.rows[0].email_verificado) return res.status(400).json({ success: false, message: 'El email ya está verificado' });
 
-    const db = await getDB();
-    const usuarioDoc = await db.collection('Usuarios').findOne({
-      email: email.toLowerCase()
-    });
+    await pool.query(`UPDATE core.tblcodigos_verificacion SET usado = true WHERE email = $1 AND tipo = 'registro' AND usado = false`, [email.toLowerCase()]);
 
-    if (!usuarioDoc) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    const usuario = new Usuario(usuarioDoc);
-
-    if (usuario.emailVerificado) {
-      return res.status(400).json({
-        success: false,
-        message: 'El email ya está verificado'
-      });
-    }
-
-    // Generar nuevo código
-    const nuevoCodigoVerificacion = usuario.generateVerificationCode();
-
-    // Actualizar en base de datos
-    await db.collection('Usuarios').updateOne(
-      { email: email.toLowerCase() },
-      {
-        $set: {
-          codigoVerificacion: usuario.codigoVerificacion,
-          codigoVerificacionExpira: usuario.codigoVerificacionExpira
-        }
-      }
+    const codigo = generarCodigo6Digitos();
+    const expiraAt = new Date(Date.now() + 15 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO core.tblcodigos_verificacion (usuario_id, email, codigo, tipo, usado, expira_at, created_at)
+       VALUES ($1, $2, $3, 'registro', false, $4, NOW())`,
+      [userResult.rows[0].id, email.toLowerCase(), codigo, expiraAt]
     );
 
-    // Enviar email
-    try {
-      await sendVerificationEmail(email, nuevoCodigoVerificacion);
-      console.log(`✅ Nuevo código enviado a ${email}`);
-    } catch (emailError) {
-      console.error('❌ Error enviando email:', emailError.message);
-    }
-
-    res.json({
-      success: true,
-      message: 'Código de verificación reenviado'
-    });
-
+    try { await sendVerificationEmail(email, codigo); } catch (e) { console.error('❌ Error email:', e.message); }
+    res.json({ success: true, message: 'Código reenviado' });
   } catch (error) {
-    console.error('❌ Error reenviando código:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al reenviar código'
-    });
+    console.error('❌ Error reenviando:', error.message);
+    res.status(500).json({ success: false, message: 'Error al reenviar código' });
   }
 }
 
-// Iniciar sesión (actualizado para verificar email)
+// ── LOGIN ──
 async function login(req, res) {
   try {
     const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ success: false, message: 'Email y contraseña son requeridos' });
+    if (!isValidEmail(email)) return res.status(400).json({ success: false, message: 'Email no válido' });
 
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email y contraseña son requeridos'
-      });
-    }
+    const userResult = await pool.query('SELECT * FROM core.tblusuarios WHERE email = $1', [email.toLowerCase()]);
+    if (userResult.rows.length === 0) return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
 
-    // 🔒 Validar email
-    if (!isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email no válido'
-      });
-    }
-
-    // Buscar usuario
-    const db = await getDB();
-    const usuarioDoc = await db.collection('Usuarios').findOne({
-      email: email.toLowerCase()
-    });
-
-    if (!usuarioDoc) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
-
-    // Crear instancia de usuario
+    const usuarioDoc = userResult.rows[0];
     const usuario = new Usuario(usuarioDoc);
 
-    // Verificar si el email está verificado
-    if (!usuario.emailVerificado) {
-      return res.status(401).json({
-        success: false,
-        message: 'Por favor verifica tu correo electrónico antes de iniciar sesión',
-        needsVerification: true,
-        email: usuario.email
-      });
-    }
+    if (!usuario.email_verificado) return res.status(401).json({ success: false, message: 'Verifica tu correo antes de iniciar sesión', needsVerification: true, email: usuario.email });
+    if (!usuario.activo) return res.status(403).json({ success: false, message: 'Usuario inactivo. Contacta al administrador.' });
 
-    // Verificar si está activo
-    if (!usuario.activo) {
-      return res.status(403).json({
-        success: false,
-        message: 'Usuario inactivo. Contacta al administrador.'
-      });
-    }
-
-    // Comparar contraseña
     const passwordValido = await usuario.comparePassword(password);
-    if (!passwordValido) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
+    if (!passwordValido) return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
 
-    // Actualizar último acceso
-    await db.collection('Usuarios').updateOne(
-      { _id: usuario._id },
-      { $set: { ultimoAcceso: new Date() } }
-    );
+    await pool.query('UPDATE core.tblusuarios SET ultimo_acceso = NOW() WHERE id = $1', [usuarioDoc.id]);
 
-    // Generar token JWT
-    const token = jwt.sign(
-      { userId: usuario._id, email: usuario.email, rol: usuario.rol },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    // Respuesta exitosa
-    res.json({
-      success: true,
-      message: 'Inicio de sesión exitoso',
-      user: usuario.toJSON(),
-      token
-    });
-
+    const token = jwt.sign({ userId: usuarioDoc.id, email: usuarioDoc.email, rol: usuarioDoc.rol }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ success: true, message: 'Inicio de sesión exitoso', user: usuario.toJSON(), token });
   } catch (error) {
     console.error('❌ Error en login:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al iniciar sesión'
-    });
+    res.status(500).json({ success: false, message: 'Error al iniciar sesión' });
   }
 }
 
-// Obtener usuario actual
+// ── PERFIL ──
 async function getProfile(req, res) {
   try {
-    const userId = req.user.userId;
-
-    const db = await getDB();
-    const usuarioDoc = await db.collection('Usuarios').findOne({
-      _id: new require('mongodb').ObjectId(userId)
-    });
-
-    if (!usuarioDoc) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    const usuario = new Usuario(usuarioDoc);
-
-    res.json({
-      success: true,
-      user: usuario.toJSON()
-    });
-
+    const userResult = await pool.query('SELECT * FROM core.tblusuarios WHERE id = $1', [req.user.userId]);
+    if (userResult.rows.length === 0) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    res.json({ success: true, user: new Usuario(userResult.rows[0]).toJSON() });
   } catch (error) {
-    console.error('❌ Error obteniendo perfil:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener perfil'
-    });
+    console.error('❌ Error perfil:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener perfil' });
   }
 }
 
-// Solicitar recuperación de contraseña (mejorado con email)
+// ── SOLICITAR RECUPERACIÓN ──
 async function requestPasswordReset(req, res) {
   try {
     const { email } = req.body;
+    if (!email || !isValidEmail(email)) return res.status(400).json({ success: false, message: 'Email válido es requerido' });
 
-    if (!email || !isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email válido es requerido'
-      });
-    }
+    const userResult = await pool.query('SELECT id FROM core.tblusuarios WHERE email = $1', [email.toLowerCase()]);
+    if (userResult.rows.length === 0) return res.json({ success: true, message: 'Si el email existe, recibirás un código' });
 
-    const db = await getDB();
-    const usuarioDoc = await db.collection('Usuarios').findOne({
-      email: email.toLowerCase()
-    });
+    await pool.query(`UPDATE core.tblcodigos_verificacion SET usado = true WHERE email = $1 AND tipo = 'recuperacion' AND usado = false`, [email.toLowerCase()]);
 
-    // 🔒 SEGURIDAD: No revelar si el usuario existe
-    if (!usuarioDoc) {
-      return res.json({
-        success: true,
-        message: 'Si el email existe, recibirás un código de recuperación'
-      });
-    }
-
-    const usuario = new Usuario(usuarioDoc);
-
-    // Generar código de recuperación
-    const codigoRecuperacion = usuario.generateRecoveryCode();
-
-    // Guardar código en la base de datos
-    await db.collection('Usuarios').updateOne(
-      { email: email.toLowerCase() },
-      {
-        $set: {
-          codigoRecuperacion: usuario.codigoRecuperacion,
-          codigoRecuperacionExpira: usuario.codigoRecuperacionExpira
-        }
-      }
+    const codigo = generarCodigo6Digitos();
+    const expiraAt = new Date(Date.now() + 15 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO core.tblcodigos_verificacion (usuario_id, email, codigo, tipo, usado, expira_at, created_at)
+       VALUES ($1, $2, $3, 'recuperacion', false, $4, NOW())`,
+      [userResult.rows[0].id, email.toLowerCase(), codigo, expiraAt]
     );
 
-    // Enviar email con el código
-    try {
-      await sendPasswordResetEmail(email, codigoRecuperacion);
-      console.log(`✅ Código de recuperación enviado a ${email}`);
-    } catch (emailError) {
-      console.error('❌ Error enviando email de recuperación:', emailError.message);
-    }
-
-    res.json({
-      success: true,
-      message: 'Si el email existe, recibirás un código de recuperación'
-    });
-
+    try { await sendPasswordResetEmail(email, codigo); } catch (e) { console.error('❌ Error email:', e.message); }
+    res.json({ success: true, message: 'Si el email existe, recibirás un código' });
   } catch (error) {
-    console.error('❌ Error solicitando recuperación:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al solicitar recuperación de contraseña'
-    });
+    console.error('❌ Error recuperación:', error.message);
+    res.status(500).json({ success: false, message: 'Error al solicitar recuperación' });
   }
 }
 
-// Restablecer contraseña
+// ── RESTABLECER CONTRASEÑA ──
 async function resetPassword(req, res) {
   try {
     const { email, codigo, nuevaPassword } = req.body;
+    if (!email || !codigo || !nuevaPassword) return res.status(400).json({ success: false, message: 'Email, código y nueva contraseña son requeridos' });
+    if (!isValidEmail(email)) return res.status(400).json({ success: false, message: 'Email no válido' });
+    if (!isStrongPassword(nuevaPassword)) return res.status(400).json({ success: false, message: getPasswordRequirementsMessage(nuevaPassword) });
 
-    if (!email || !codigo || !nuevaPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email, código y nueva contraseña son requeridos'
-      });
-    }
+    const userResult = await pool.query('SELECT id FROM core.tblusuarios WHERE email = $1', [email.toLowerCase()]);
+    if (userResult.rows.length === 0) return res.status(400).json({ success: false, message: 'Código inválido o expirado' });
 
-    // 🔒 Validar email
-    if (!isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email no válido'
-      });
-    }
-
-    // 🔒 Validar contraseña fuerte
-    if (!isStrongPassword(nuevaPassword)) {
-      const message = getPasswordRequirementsMessage(nuevaPassword);
-      return res.status(400).json({
-        success: false,
-        message: message
-      });
-    }
-
-    const db = await getDB();
-    const usuarioDoc = await db.collection('Usuarios').findOne({
-      email: email.toLowerCase()
-    });
-
-    if (!usuarioDoc) {
-      return res.status(400).json({
-        success: false,
-        message: 'Código inválido o expirado'
-      });
-    }
-
-    const usuario = new Usuario(usuarioDoc);
-
-    // Verificar código
-    if (!usuario.isRecoveryCodeValid(codigo)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Código inválido o expirado'
-      });
-    }
-
-    // Actualizar contraseña
-    usuario.password = nuevaPassword;
-    await usuario.hashPassword();
-
-    // Actualizar en base de datos y limpiar código
-    await db.collection('Usuarios').updateOne(
-      { email: email.toLowerCase() },
-      {
-        $set: { password: usuario.password },
-        $unset: { codigoRecuperacion: '', codigoRecuperacionExpira: '' }
-      }
+    const codigoResult = await pool.query(
+      `SELECT id FROM core.tblcodigos_verificacion
+       WHERE email = $1 AND codigo = $2 AND tipo = 'recuperacion' AND usado = false AND expira_at > NOW()
+       ORDER BY created_at DESC LIMIT 1`,
+      [email.toLowerCase(), codigo]
     );
+    if (codigoResult.rows.length === 0) return res.status(400).json({ success: false, message: 'Código inválido o expirado' });
 
-    res.json({
-      success: true,
-      message: 'Contraseña actualizada exitosamente'
-    });
+    await pool.query('UPDATE core.tblcodigos_verificacion SET usado = true WHERE id = $1', [codigoResult.rows[0].id]);
+    const password_hash = await Usuario.hashPassword(nuevaPassword);
+    await pool.query('UPDATE core.tblusuarios SET password_hash = $1, updated_at = NOW() WHERE id = $2', [password_hash, userResult.rows[0].id]);
 
+    res.json({ success: true, message: 'Contraseña actualizada exitosamente' });
   } catch (error) {
-    console.error('❌ Error restableciendo contraseña:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error al restablecer contraseña'
-    });
+    console.error('❌ Error restableciendo:', error.message);
+    res.status(500).json({ success: false, message: 'Error al restablecer contraseña' });
   }
 }
 
-// 🔒 Cerrar sesión e invalidar token
-// Cerrar sesión (invalidar token) - NUEVO/ACTUALIZADO
+// ── LOGOUT ──
 const logout = async (req, res) => {
   try {
-    const token = req.token; // El token viene del middleware verifyToken
-    const user = req.user;   // Los datos del usuario vienen del token decodificado
-
-    // Obtener expiración del token (7 días desde ahora)
-    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
-
-    // Agregar token a la blacklist
-    tokenBlacklist.add(token, expiresAt);
-
-    // 🔥 LOG DETALLADO del logout
-    SecureLogger.auth('Logout', user.email, true, {
-      userId: user.userId,
-      rol: user.rol,
-      ip: req.ip,
-      userAgent: req.headers['user-agent']?.substring(0, 50),
-      tokenBlacklistSize: tokenBlacklist.size()
-    });
-
-    console.log('🔴 SESIÓN CERRADA:');
-    console.log(`   👤 Usuario: ${user.email}`);
-    console.log(`   🆔 ID: ${user.userId}`);
-    console.log(`   👔 Rol: ${user.rol}`);
-    console.log(`   🌐 IP: ${req.ip}`);
-    console.log(`   📊 Tokens en blacklist: ${tokenBlacklist.size()}`);
-
-    res.json({
-      success: true,
-      message: 'Sesión cerrada exitosamente'
-    });
-
+    const token = req.token;
+    const user = req.user;
+    tokenBlacklist.add(token, Date.now() + 7 * 24 * 60 * 60 * 1000);
+    SecureLogger.auth('Logout', user.email, true, { userId: user.userId, rol: user.rol, ip: req.ip });
+    res.json({ success: true, message: 'Sesión cerrada exitosamente' });
   } catch (error) {
     SecureLogger.error('Error en logout', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al cerrar sesión'
-    });
+    res.status(500).json({ success: false, message: 'Error al cerrar sesión' });
   }
 };
 
-module.exports = {
-  register,
-  verifyEmail,
-  resendVerificationCode,
-  login,
-  getProfile,
-  requestPasswordReset,
-  resetPassword,
-  logout // ✅ NUEVO
-};
+module.exports = { register, verifyEmail, resendVerificationCode, login, getProfile, requestPasswordReset, resetPassword, logout };

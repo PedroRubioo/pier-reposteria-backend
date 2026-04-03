@@ -162,10 +162,49 @@ app.get('/api/csrf-token', getCSRFTokenEndpoint);
 const authRoutes = require('./routes/authRoutes');
 const googleAuthRoutes = require('./routes/googleAuthRoutes');
 const backupRoutes = require('./routes/backupRoutes');
+const seguridadBDRoutes = require('./routes/seguridadBDRoutes');
+const productosRoutes = require('./routes/productosRoutes');
+const favoritosRoutes = require('./routes/favoritosRoutes');
+const carritoRoutes = require('./routes/carritoRoutes');
+const pedidosRoutes = require('./routes/pedidosRoutes');
+const resenasRoutes = require('./routes/resenasRoutes');
+const quejasRoutes = require('./routes/quejasRoutes');
+const reembolsosRoutes = require('./routes/reembolsosRoutes');
+const promocionesRoutes = require('./routes/promocionesRoutes');
+const notificacionesRoutes = require('./routes/notificacionesRoutes');
+const contactoRoutes = require('./routes/contactoRoutes');
+const usuariosRoutes = require('./routes/usuariosRoutes');
+const configuracionRoutes = require('./routes/configuracionRoutes');
+const reportesRoutes = require('./routes/reportesRoutes');
+const sorteosRoutes = require('./routes/sorteosRoutes');
+const uploadRoutes = require('./routes/uploadRoutes');
+const monitoreoRoutes = require('./routes/monitoreoRoutes');
+
+
+
 
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', googleAuthRoutes);
 app.use('/api/backups', backupRoutes);
+app.use('/api/seguridad-bd', seguridadBDRoutes);
+app.use('/api', productosRoutes);
+app.use('/api/favoritos', favoritosRoutes);
+app.use('/api/carrito', carritoRoutes);
+app.use('/api/pedidos', pedidosRoutes);
+app.use('/api/resenas', resenasRoutes);
+app.use('/api/quejas', quejasRoutes);
+app.use('/api/reembolsos', reembolsosRoutes);
+app.use('/api/promociones', promocionesRoutes);
+app.use('/api/notificaciones', notificacionesRoutes);
+app.use('/api/contacto', contactoRoutes);
+app.use('/api/usuarios', usuariosRoutes);
+app.use('/api/configuracion', configuracionRoutes);
+app.use('/api/reportes', reportesRoutes);
+app.use('/api/sorteos', sorteosRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/monitoreo', monitoreoRoutes);
+
+
 // ========================================
 // RUTA PRINCIPAL
 // ========================================

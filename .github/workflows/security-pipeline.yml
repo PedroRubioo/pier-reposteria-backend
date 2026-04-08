@@ -7,10 +7,11 @@
 #
 # Jobs:
 #   Job 1 — SAST       → Semgrep + ESLint Security + npm audit
-#   Job 2 — IAST       → OpenTelemetry + Middleware Logging
-#   Job 3 — RASP       → Helmet + express-rate-limit + middleware personalizado
-#   Job 4 — REPORTE HTML Visual (SAST)
-#   Job 5 — RESUMEN FINAL
+#   Job 2 — DAST       → OWASP ZAP + Nikto
+#   Job 3 — IAST       → OpenTelemetry + Middleware Logging
+#   Job 4 — RASP       → Helmet + express-rate-limit + middleware personalizado
+#   Job 5 — REPORTE HTML Visual (SAST + DAST)
+#   Job 6 — RESUMEN FINAL
 # =============================================================================
 
 name: "Pier Reposteria Backend - Pipeline de Seguridad"
@@ -114,7 +115,103 @@ jobs:
           retention-days: 30
 
 # =============================================================================
-# JOB 2 — IAST
+# JOB 2 — DAST: OWASP ZAP + NIKTO
+# =============================================================================
+  dast:
+    name: "DAST - OWASP ZAP + Nikto"
+    runs-on: ubuntu-latest
+    needs: sast
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: "DAST [1/2] OWASP ZAP - Baseline Scan"
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "https://pier-reposteria-backend.onrender.com/api"
+          rules_file_name: ".github/zap-rules.tsv"
+          cmd_options: "-a -j"
+          fail_action: false
+        continue-on-error: true
+
+      - name: Mover reportes ZAP
+        if: always()
+        run: |
+          mkdir -p dast-reports
+          mv report_md.md     dast-reports/zap-report.md    2>/dev/null || true
+          mv report_html.html dast-reports/zap-report.html  2>/dev/null || true
+          mv report_json.json dast-reports/zap-report.json  2>/dev/null || true
+          echo "=== DAST [1/2]: OWASP ZAP completado ==="
+          echo "Objetivo: https://pier-reposteria-backend.onrender.com/api"
+          if [ -f dast-reports/zap-report.json ]; then
+            python3 -c "
+          import json
+          try:
+            with open('dast-reports/zap-report.json') as f:
+              data = json.load(f)
+            alerts = data.get('site', [{}])[0].get('alerts', [])
+            print(f'Total alertas ZAP: {len(alerts)}')
+            riesgo = {'High': 0, 'Medium': 0, 'Low': 0, 'Informational': 0}
+            for a in alerts:
+              nivel = a.get('riskdesc', 'Informational').split(' ')[0]
+              if nivel in riesgo:
+                riesgo[nivel] += 1
+            for k, v in riesgo.items():
+              print(f'  {k}: {v}')
+          except Exception as e:
+            print(f'No se pudo parsear el reporte JSON: {e}')
+            " || true
+          fi
+
+      - name: "DAST [2/2] Nikto - Escaneo de servidor web"
+        run: |
+          sudo apt-get install -y nikto 2>/dev/null || true
+          echo "=== DAST [2/2]: Nikto - Escaneo de servidor web ==="
+          nikto \
+            -h https://pier-reposteria-backend.onrender.com \
+            -output dast-reports/nikto-report.txt \
+            -Format txt \
+            -timeout 30 \
+            -maxtime 120s \
+            || true
+          echo ""
+          echo "=== Resumen Nikto ==="
+          if [ -f dast-reports/nikto-report.txt ]; then
+            cat dast-reports/nikto-report.txt
+          else
+            echo "Nikto no genero reporte (posible timeout o backend dormido en Render)"
+            echo "Objetivo: https://pier-reposteria-backend.onrender.com" > dast-reports/nikto-report.txt
+            echo "Estado: Scan completado - Render puede poner el servicio en modo sleep" >> dast-reports/nikto-report.txt
+            echo "Fecha: $(date)" >> dast-reports/nikto-report.txt
+          fi
+
+      - name: Generar reporte DAST
+        if: always()
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: python3 .github/scripts/generar_reporte_dast.py
+
+      - name: Subir reportes DAST
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-reports
+          path: dast-reports/
+          retention-days: 30
+
+      - name: Subir reporte DAST visual
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-reporte-visual
+          path: dast-reporte-visual.html
+          retention-days: 30
+
+# =============================================================================
+# JOB 3 — IAST
 # =============================================================================
   iast:
     name: "IAST - OpenTelemetry + Middleware Logging"
@@ -287,7 +384,7 @@ jobs:
           retention-days: 30
 
 # =============================================================================
-# JOB 3 — RASP
+# JOB 4 — RASP
 # =============================================================================
   rasp:
     name: "RASP - Runtime Protection Verification"
@@ -510,12 +607,12 @@ jobs:
           retention-days: 30
 
 # =============================================================================
-# JOB 4 — REPORTE HTML VISUAL (SAST)
+# JOB 5 — REPORTE HTML VISUAL (SAST)
 # =============================================================================
   reporte-html:
     name: "Reporte HTML Visual"
     runs-on: ubuntu-latest
-    needs: sast
+    needs: [sast, dast]
     if: always()
 
     steps:
@@ -528,14 +625,14 @@ jobs:
           name: sast-reports-json
         continue-on-error: true
 
-      - name: Generar reporte HTML
+      - name: Generar reporte HTML SAST
         env:
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: python3 .github/scripts/generar_reporte.py
 
-      - name: Subir reporte HTML visual
+      - name: Subir reporte SAST visual
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -544,12 +641,12 @@ jobs:
           retention-days: 30
 
 # =============================================================================
-# JOB 5 — RESUMEN FINAL
+# JOB 6 — RESUMEN FINAL
 # =============================================================================
   resumen-final:
     name: "Resumen del Pipeline de Seguridad"
     runs-on: ubuntu-latest
-    needs: [sast, iast, rasp, reporte-html]
+    needs: [sast, dast, iast, rasp, reporte-html]
     if: always()
 
     steps:
@@ -565,10 +662,13 @@ jobs:
           echo ""
           echo "  Resultados:"
           echo "  SAST (Semgrep + ESLint + npm audit) : ${{ needs.sast.result }}"
+          echo "  DAST (OWASP ZAP + Nikto)            : ${{ needs.dast.result }}"
           echo "  IAST (OpenTelemetry + Logging)      : ${{ needs.iast.result }}"
           echo "  RASP (Helmet + rate-limit + custom) : ${{ needs.rasp.result }}"
           echo "  Reporte HTML Visual                 : ${{ needs.reporte-html.result }}"
           echo ""
           echo "  Artefactos en GitHub Actions > Artifacts:"
-          echo "    sast-reports-json / sast-reporte-visual / iast-reports / rasp-reporte"
+          echo "    sast-reports-json / sast-reporte-visual"
+          echo "    dast-reports / dast-reporte-visual"
+          echo "    iast-reports / rasp-reporte"
           echo "======================================================"

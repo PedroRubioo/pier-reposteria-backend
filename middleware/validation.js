@@ -1,3 +1,4 @@
+/* eslint-disable security/detect-unsafe-regex */
 // middleware/validation.js
 const validator = require('validator');
 

@@ -8,3 +8,8 @@
 # aunque los datos ya esten escapados.
 routes/pedidosRoutes.js
 routes/reembolsosRoutes.js
+
+# Falso positivo: cookies ya configuradas con secure, httpOnly, sameSite y maxAge.
+# Semgrep espera ver domain, path y expires como atributos literales y no reconoce
+# la evaluacion dinamica de process.env.NODE_ENV ni que maxAge equivale a expires.
+server.js

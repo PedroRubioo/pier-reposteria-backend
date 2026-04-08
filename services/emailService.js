@@ -15,7 +15,9 @@ const transporter = nodemailer.createTransport({
   socketTimeout: 30000,
   requireTLS: true, // Forzar TLS
   tls: {
-    rejectUnauthorized: false // Permitir certificados auto-firmados
+    // 🔒 SEGURIDAD: En producción se valida el certificado TLS.
+    // En desarrollo/CI se permite false para compatibilidad con servidores SMTP locales.
+    rejectUnauthorized: process.env.NODE_ENV === 'production' ? true : false
   },
   debug: true // Para ver logs detallados
 });
@@ -330,7 +332,7 @@ async function verifyEmailConfig() {
     
     await transporter.verify();
     console.log('✅ Configuración de email verificada correctamente');
-    console.log('�️ Servidor: smtp.gmail.com:587');
+    console.log('🖥️ Servidor: smtp.gmail.com:587');
     return true;
   } catch (error) {
     console.error('❌ Error en configuración de email:', error.message);

@@ -21,7 +21,9 @@ const pool = new Pool({
   connectionString,
   ssl: {
     require: true,
-    rejectUnauthorized: false // Necesario para algunos entornos
+    // 🔒 SEGURIDAD: En producción se valida el certificado TLS.
+    // En desarrollo/CI se permite false para compatibilidad con Neon pooler.
+    rejectUnauthorized: process.env.NODE_ENV === 'production' ? true : false
   },
   // Configuraciones adicionales para mejor rendimiento
   max: 10, // máximo 10 conexiones en el pool

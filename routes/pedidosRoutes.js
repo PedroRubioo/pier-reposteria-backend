@@ -1,6 +1,7 @@
 // routes/pedidosRoutes.js — Pedidos
 const express = require('express');
 const router = express.Router();
+const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 
@@ -48,7 +49,13 @@ router.post('/', verifyToken, async (req, res) => {
     const userData = await pool.query('SELECT nombre, email FROM core.tblusuarios WHERE id = $1', [userId]);
     if (userData.rows.length > 0) {
       const u = userData.rows[0];
-      const itemsTexto = items.map(i => `${i.nombre} x${i.cantidad}`).join(', ');
+
+      // 🔒 SEGURIDAD: Sanitizar datos dinámicos antes de insertarlos en HTML
+      const safeNumero = he.escape(String(numero));
+      const safeTotal = he.escape(total.toFixed(2));
+      const safeItemsTexto = he.escape(items.map(i => `${i.nombre} x${i.cantidad}`).join(', '));
+      const safeHorario = horario_recogida ? he.escape(String(horario_recogida)) : null;
+
       await notificarConEmail({
         usuario_id: userId,
         tipo: 'pedido',
@@ -56,14 +63,14 @@ router.post('/', verifyToken, async (req, res) => {
         mensaje: `Tu pedido #${numero} por $${total.toFixed(2)} ha sido recibido. Te avisaremos cuando esté en preparación.`,
         email: u.email,
         nombre: u.nombre,
-        asunto: `🍰 Pedido #${numero} recibido — Pier Repostería`,
+        asunto: `🍰 Pedido #${safeNumero} recibido — Pier Repostería`,
         contenidoHtml: `
           <h2>¡Tu pedido ha sido recibido!</h2>
           <div class="highlight-box">
-            <p><strong>Pedido:</strong> #${numero}</p>
-            <p><strong>Total:</strong> $${total.toFixed(2)} MXN</p>
-            <p><strong>Productos:</strong> ${itemsTexto}</p>
-            ${horario_recogida ? `<p><strong>Horario de recogida:</strong> ${horario_recogida}</p>` : ''}
+            <p><strong>Pedido:</strong> #${safeNumero}</p>
+            <p><strong>Total:</strong> $${safeTotal} MXN</p>
+            <p><strong>Productos:</strong> ${safeItemsTexto}</p>
+            ${safeHorario ? `<p><strong>Horario de recogida:</strong> ${safeHorario}</p>` : ''}
           </div>
           <p>Te notificaremos cuando tu pedido esté en preparación y cuando esté listo para recoger.</p>
           <p><strong>Recuerda:</strong> recoge tu pedido en Sucursal Principal, Huejutla de Reyes.</p>
@@ -187,15 +194,20 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
         const userData = await pool.query('SELECT nombre, email FROM core.tblusuarios WHERE id = $1', [pedido.usuario_id]);
         if (userData.rows.length > 0) {
           const u = userData.rows[0];
+
+          // 🔒 SEGURIDAD: Sanitizar datos dinámicos antes de insertarlos en HTML
+          const safeNumero = he.escape(String(pedido.numero));
+          const safeTotal = he.escape(parseFloat(pedido.total).toFixed(2));
+
           await notificarConEmail({
             usuario_id: pedido.usuario_id, tipo: notif.tipo, titulo: notif.titulo, mensaje: notif.mensaje,
             email: u.email, nombre: u.nombre,
-            asunto: `🍰 ¡Tu pedido #${pedido.numero} está listo! — Pier Repostería`,
+            asunto: `🍰 ¡Tu pedido #${safeNumero} está listo! — Pier Repostería`,
             contenidoHtml: `
               <h2>¡Tu pedido está listo para recoger!</h2>
               <div class="highlight-box">
-                <p><strong>Pedido:</strong> #${pedido.numero}</p>
-                <p><strong>Total:</strong> $${parseFloat(pedido.total).toFixed(2)} MXN</p>
+                <p><strong>Pedido:</strong> #${safeNumero}</p>
+                <p><strong>Total:</strong> $${safeTotal} MXN</p>
                 <p><strong>Recoger en:</strong> Sucursal Principal — Huejutla de Reyes</p>
               </div>
               <p>Pasa a recoger tu pedido en horario de atención. ¡Te esperamos!</p>

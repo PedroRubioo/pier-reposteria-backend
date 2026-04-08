@@ -1,6 +1,7 @@
 // routes/reembolsosRoutes.js — Reembolsos
 const express = require('express');
 const router = express.Router();
+const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 
@@ -112,21 +113,27 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
           const userData = await pool.query('SELECT nombre, email FROM core.tblusuarios WHERE id = $1', [clienteId]);
           if (userData.rows.length > 0) {
             const u = userData.rows[0];
+
+            // 🔒 SEGURIDAD: Sanitizar datos dinámicos antes de insertarlos en HTML
+            const safeNumero = he.escape(String(pedidoNumero));
+            const safeMonto = he.escape(String(reembolso.monto));
+            const safeJustificacion = justificacion_rechazo ? he.escape(String(justificacion_rechazo)) : '';
+
             await notificarConEmail({
               usuario_id: clienteId, tipo, titulo, mensaje,
               email: u.email, nombre: u.nombre,
-              asunto: estado === 'aprobado' ? `✅ Reembolso aprobado — Pedido #${pedidoNumero}` : `Reembolso rechazado — Pedido #${pedidoNumero}`,
+              asunto: estado === 'aprobado' ? `✅ Reembolso aprobado — Pedido #${safeNumero}` : `Reembolso rechazado — Pedido #${safeNumero}`,
               contenidoHtml: estado === 'aprobado'
                 ? `<h2>Tu reembolso ha sido aprobado</h2>
                    <div class="highlight-box">
-                     <p><strong>Pedido:</strong> #${pedidoNumero}</p>
-                     <p><strong>Monto reembolsado:</strong> $${reembolso.monto} MXN</p>
+                     <p><strong>Pedido:</strong> #${safeNumero}</p>
+                     <p><strong>Monto reembolsado:</strong> $${safeMonto} MXN</p>
                    </div>
                    <p>El reembolso se procesará en los próximos días hábiles.</p>`
                 : `<h2>Tu solicitud de reembolso no fue aprobada</h2>
                    <div class="highlight-box">
-                     <p><strong>Pedido:</strong> #${pedidoNumero}</p>
-                     ${justificacion_rechazo ? `<p><strong>Motivo:</strong> ${justificacion_rechazo}</p>` : ''}
+                     <p><strong>Pedido:</strong> #${safeNumero}</p>
+                     ${safeJustificacion ? `<p><strong>Motivo:</strong> ${safeJustificacion}</p>` : ''}
                    </div>
                    <p>Si tienes dudas, puedes contactarnos a través de la sección de Contacto.</p>`
             });

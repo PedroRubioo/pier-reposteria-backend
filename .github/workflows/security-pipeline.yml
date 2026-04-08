@@ -68,12 +68,12 @@ jobs:
 
       - name: "SAST [2/3] ESLint Security Plugin - Backend Node.js"
         run: |
-          npm install --save-dev eslint eslint-plugin-security 2>/dev/null || true
-          cat > .eslint-security.json << 'EOF'
-          {
-            "env": { "node": true, "es2021": true },
-            "plugins": ["security"],
-            "rules": {
+          npm install --save-dev eslint@8 eslint-plugin-security 2>/dev/null || true
+          cat > .eslint-security.js << 'EOF'
+          module.exports = {
+            env: { node: true, es2021: true },
+            plugins: ["security"],
+            rules: {
               "security/detect-object-injection": "warn",
               "security/detect-non-literal-regexp": "warn",
               "security/detect-unsafe-regex": "warn",
@@ -85,10 +85,10 @@ jobs:
               "security/detect-pseudoRandomBytes": "warn",
               "security/detect-non-literal-fs-filename": "warn"
             }
-          }
+          };
           EOF
           npx eslint \
-            --config .eslint-security.json \
+            --config .eslint-security.js \
             --ext .js \
             --format json \
             --output-file sast-eslint-results.json \

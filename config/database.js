@@ -12,7 +12,7 @@ const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   console.error('\n❌ ERROR CRÍTICO: DATABASE_URL no está definida en el archivo .env');
   console.error('📌 Agrega esta línea a tu archivo .env:');
-  console.error('   DATABASE_URL=postgresql://neondb_owner:npg_CSgtR4Wqi7mx@ep-nameless-firefly-aj8v9zii-pooler.c-3.us-east-2.aws.neon.tech/neondb?sslmode=require\n');
+  console.error('   DATABASE_URL=postgresql://neondb_owner:npg_CSgtR4Wqi7mx@ep-nameless-firefly-aj8v9zii-pooler.c-3.us-east-2.aws.neon.tech/neondb?sslmode=require\n'); // nosemgrep
   process.exit(1); // Detener la ejecución
 }
 

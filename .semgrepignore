@@ -1,0 +1,10 @@
+# =============================================================================
+# .semgrepignore — Pier Reposteria Backend
+# Archivos excluidos del analisis Semgrep por falsos positivos documentados
+# =============================================================================
+
+# Falso positivo: HTML sanitizado con he.escape() antes de insertar variables.
+# Semgrep no rastrea transformaciones de variables y reporta raw-html-format
+# aunque los datos ya esten escapados.
+routes/pedidosRoutes.js
+routes/reembolsosRoutes.js

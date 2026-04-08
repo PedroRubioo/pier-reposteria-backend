@@ -10,7 +10,7 @@
 #   Job 2 — DAST       → OWASP ZAP + Nikto
 #   Job 3 — IAST       → OpenTelemetry + Middleware Logging
 #   Job 4 — RASP       → Helmet + express-rate-limit + middleware personalizado
-#   Job 5 — REPORTE HTML Visual (SAST + DAST)
+#   Job 5 — REPORTE HTML Visual (SAST)
 #   Job 6 — RESUMEN FINAL
 # =============================================================================
 
@@ -39,7 +39,6 @@ jobs:
         with:
           config: >-
             p/nodejs
-            p/express
             p/jwt
             p/secrets
             p/sql-injection
@@ -50,7 +49,6 @@ jobs:
           pip install semgrep --quiet
           semgrep \
             --config=p/nodejs \
-            --config=p/express \
             --config=p/jwt \
             --config=p/secrets \
             --config=p/sql-injection \

@@ -13,7 +13,7 @@ zap_medium = 0
 zap_low = 0
 zap_info = 0
 zap_target = 'https://pier-reposteria-backend.onrender.com/api'
-zap_status = 'Sin alertas detectadas (WAF de Vercel puede limitar el scan activo)'
+zap_status = 'Sin alertas detectadas (Render puede poner el backend en modo sleep)'
 
 for zap_path in ['dast-reports/zap-report.json', 'zap-report.json']:
     try:
@@ -115,7 +115,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Reporte DAST - Pier Reposteria</title>
+<title>Reporte DAST - Pier Reposteria Backend</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{--verde:#6b7c3e;--dorado:#d4a574;--bg:#0d0f0a;--bg2:#13160e;--bg3:#1a1e12;
@@ -212,8 +212,8 @@ footer span{color:#d4a574;}
 <header>
   <div class="header-left">
     <div class="logo-badge"><div class="logo-dot"></div>DAST REPORT &bull; GITHUB ACTIONS CI/CD</div>
-    <h1>Reporte <span>DAST</span><br>Pier Reposteria</h1>
-    <p class="subtitle">Analisis dinamico automatizado &bull; OWASP ZAP Baseline Scan + Nikto<br>Docente: Ing. Ana Maria Felipe Redondo</p>
+    <h1>Reporte <span>DAST</span><br>Pier Reposteria <span style="font-size:0.6em;color:var(--text2)">Backend</span></h1>
+    <p class="subtitle">Analisis dinamico automatizado Analisis dinamico automatizado &bull; OWASP ZAP Baseline Scan + Niktobull; OWASP ZAP Baseline Scan + Nikto Analisis dinamico automatizado &bull; OWASP ZAP Baseline Scan + Niktobull; Node.js/Express<br>Docente: Ing. Ana Maria Felipe Redondo</p>
     <div class="meta-chips">
       <span class="chip">Pedro Rubio Angeles &bull; 20230074</span>
       <span class="chip">Alexander Hernandez Meza &bull; 20230106</span>
@@ -232,7 +232,7 @@ footer span{color:#d4a574;}
   <div class="card CARD_ZAP_L"><div class="icon">&#128994;</div><div class="num">ZAP_LOW</div><div class="lbl">ZAP Bajas</div></div>
   <div class="card CARD_ZAP_I"><div class="icon">&#8505;</div><div class="num">ZAP_INFO</div><div class="lbl">ZAP Info</div></div>
   <div class="card CARD_NIKTO"><div class="icon">&#128270;</div><div class="num">NIKTO_COUNT</div><div class="lbl">Nikto Hallazgos</div></div>
-  <div class="card azul"><div class="icon">&#127760;</div><div class="num" style="font-size:13px;padding-top:6px">pier-reposteria<br>.vercel.app</div><div class="lbl">Objetivo</div></div>
+  <div class="card azul"><div class="icon">&#127760;</div><div class="num" style="font-size:13px;padding-top:6px">pier-reposteria-backend<br>.onrender.com</div><div class="lbl">Objetivo</div></div>
 </div>
 
 <div class="section">
@@ -288,8 +288,8 @@ footer span{color:#d4a574;}
     <div class="rec-num">1</div>
     <div class="rec-content">
       <div class="rec-title">Agregar header X-Frame-Options</div>
-      <div class="rec-desc">Nikto detecto la ausencia del header anti-clickjacking. Configura Vercel para incluirlo en todas las respuestas para prevenir ataques de clickjacking.</div>
-      <div class="rec-cmd">vercel.json &rarr; headers: [{ "X-Frame-Options": "DENY" }]</div>
+      <div class="rec-desc">Nikto detecto la ausencia del header anti-clickjacking. Configura los headers HTTP en el middleware de Express/Helmet para incluirlo en todas las respuestas.</div>
+      <div class="rec-cmd">helmet({ frameguard: { action: 'deny' } }) en server.js</div>
     </div>
   </div>
   <div class="rec-item">

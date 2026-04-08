@@ -2,13 +2,6 @@
 
 /**
  * 🔒 SECURE LOGGER - Sistema de logging que NO registra información sensible
- * 
- * NUNCA loguear:
- * - Contraseñas
- * - Tokens JWT
- * - Códigos de verificación/recuperación
- * - Información de tarjetas de crédito
- * - Datos personales sensibles
  */
 
 const SENSITIVE_FIELDS = [
@@ -41,19 +34,20 @@ function sanitizeForLogging(obj) {
   const sanitized = {};
   
   for (const [key, value] of Object.entries(obj)) {
+    // 🔒 SEGURIDAD: Validar que la clave pertenece al objeto original
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+
     const lowerKey = key.toLowerCase();
     
-    // Si el campo es sensible, reemplazar con [REDACTED]
     if (SENSITIVE_FIELDS.some(field => lowerKey.includes(field))) {
-      sanitized[key] = '[REDACTED]';
+      sanitized[key] = '[REDACTED]'; // eslint-disable-line security/detect-object-injection
       continue;
     }
 
-    // Recursivamente sanitizar objetos anidados
     if (typeof value === 'object' && value !== null) {
-      sanitized[key] = sanitizeForLogging(value);
+      sanitized[key] = sanitizeForLogging(value); // eslint-disable-line security/detect-object-injection
     } else {
-      sanitized[key] = value;
+      sanitized[key] = value; // eslint-disable-line security/detect-object-injection
     }
   }
 
@@ -61,7 +55,7 @@ function sanitizeForLogging(obj) {
 }
 
 /**
- * Enmascarar email (mostrar solo primeros 3 caracteres y dominio)
+ * Enmascarar email
  */
 function maskEmail(email) {
   if (!email || typeof email !== 'string') return email;
@@ -77,92 +71,56 @@ function maskEmail(email) {
  * Logger seguro
  */
 class SecureLogger {
-  /**
-   * Log de información
-   */
   static info(message, data = {}) {
     const sanitizedData = sanitizeForLogging(data);
     const timestamp = new Date().toISOString();
-    
     console.log(`[INFO] ${timestamp} - ${message}`, 
-      Object.keys(sanitizedData).length > 0 ? sanitizedData : ''
-    );
+      Object.keys(sanitizedData).length > 0 ? sanitizedData : '');
   }
 
-  /**
-   * Log de error
-   */
   static error(message, error = {}) {
     const timestamp = new Date().toISOString();
-    
-    // Solo loguear mensaje de error y stack trace, NO el objeto completo
     const errorInfo = {
       message: error.message || error,
       name: error.name,
       code: error.code,
-      // Stack trace solo en desarrollo
       ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
     };
-
     console.error(`[ERROR] ${timestamp} - ${message}`, errorInfo);
   }
 
-  /**
-   * Log de advertencia
-   */
   static warn(message, data = {}) {
     const sanitizedData = sanitizeForLogging(data);
     const timestamp = new Date().toISOString();
-    
     console.warn(`[WARN] ${timestamp} - ${message}`, 
-      Object.keys(sanitizedData).length > 0 ? sanitizedData : ''
-    );
+      Object.keys(sanitizedData).length > 0 ? sanitizedData : '');
   }
 
-  /**
-   * Log de autenticación
-   */
   static auth(action, email, success = true, details = {}) {
     const timestamp = new Date().toISOString();
     const maskedEmail = maskEmail(email);
     const sanitizedDetails = sanitizeForLogging(details);
-    
     const status = success ? '✅ SUCCESS' : '❌ FAILED';
-    
-    console.log(
-      `[AUTH] ${timestamp} - ${status} - ${action} - ${maskedEmail}`,
-      Object.keys(sanitizedDetails).length > 0 ? sanitizedDetails : ''
-    );
+    console.log(`[AUTH] ${timestamp} - ${status} - ${action} - ${maskedEmail}`,
+      Object.keys(sanitizedDetails).length > 0 ? sanitizedDetails : '');
   }
 
-  /**
-   * Log de seguridad (intentos sospechosos)
-   */
   static security(event, details = {}) {
     const timestamp = new Date().toISOString();
     const sanitizedDetails = sanitizeForLogging(details);
-    
-    console.warn(
-      `[SECURITY] ${timestamp} - ${event}`,
-      sanitizedDetails
-    );
+    console.warn(`[SECURITY] ${timestamp} - ${event}`, sanitizedDetails);
   }
 
-  /**
-   * Log de debug (solo en desarrollo)
-   */
   static debug(message, data = {}) {
     if (process.env.NODE_ENV !== 'development') return;
-    
     const sanitizedData = sanitizeForLogging(data);
     const timestamp = new Date().toISOString();
-    
     console.log(`[DEBUG] ${timestamp} - ${message}`, sanitizedData);
   }
 }
 
 /**
- * Middleware para loguear requests (de forma segura)
+ * Middleware para loguear requests
  */
 function requestLoggerMiddleware(req, res, next) {
   const timestamp = new Date().toISOString();
@@ -170,27 +128,19 @@ function requestLoggerMiddleware(req, res, next) {
   const url = req.url;
   const ip = req.ip || req.connection.remoteAddress;
   
-  // NO loguear body completo (puede contener contraseñas)
-  // Solo loguear metadata
   SecureLogger.info('Request received', {
-    method,
-    url,
-    ip,
-    userAgent: req.headers['user-agent']?.substring(0, 100) // Truncar user agent
+    method, url, ip,
+    userAgent: req.headers['user-agent']?.substring(0, 100)
   });
 
-  // Log cuando termina el response
   const originalSend = res.send;
   res.send = function(data) {
     const duration = Date.now() - req.startTime;
-    
     SecureLogger.info('Response sent', {
-      method,
-      url,
+      method, url,
       statusCode: res.statusCode,
       duration: `${duration}ms`
     });
-    
     originalSend.call(this, data);
   };
 

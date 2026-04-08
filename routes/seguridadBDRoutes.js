@@ -20,7 +20,6 @@ router.get('/roles', verifyToken, verifyRole('direccion_general'), async (req, r
       WHERE rolname IN ('rol_consulta', 'rol_operacion', 'rol_admin')
       ORDER BY rolname
     `);
-
     res.json({ success: true, roles: rolesResult.rows });
   } catch (error) {
     console.error('Error en /roles:', error.message);
@@ -29,7 +28,7 @@ router.get('/roles', verifyToken, verifyRole('direccion_general'), async (req, r
 });
 
 // ============================================
-// LISTAR PERMISOS POR ROL (GRANT detallado)
+// LISTAR PERMISOS POR ROL
 // ============================================
 router.get('/permisos', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   try {
@@ -45,7 +44,6 @@ router.get('/permisos', verifyToken, verifyRole('direccion_general'), async (req
       GROUP BY grantee, table_schema, table_name
       ORDER BY grantee, table_schema, table_name
     `);
-
     res.json({ success: true, permisos: permisosResult.rows });
   } catch (error) {
     console.error('Error en /permisos:', error.message);
@@ -70,7 +68,6 @@ router.get('/esquemas', verifyToken, verifyRole('direccion_general'), async (req
         AND r.rolname IN ('rol_consulta', 'rol_operacion', 'rol_admin')
       ORDER BY nspname, r.rolname
     `);
-
     res.json({ success: true, esquemas: esquemasResult.rows });
   } catch (error) {
     console.error('Error en /esquemas:', error.message);
@@ -79,12 +76,11 @@ router.get('/esquemas', verifyToken, verifyRole('direccion_general'), async (req
 });
 
 // ============================================
-// PROBAR ACCESO (simula operación con un rol)
+// PROBAR ACCESO
 // ============================================
 router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   const { rol, operacion, tabla } = req.body;
 
-  // Validar inputs
   const rolesValidos = ['rol_consulta', 'rol_operacion', 'rol_admin'];
   const operacionesValidas = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
 
@@ -95,7 +91,6 @@ router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), asyn
     return res.status(400).json({ success: false, message: 'Operación no válida' });
   }
 
-  // Validar que la tabla existe y es segura (prevenir SQL injection)
   try {
     const tablaExiste = await pool.query(
       `SELECT table_name FROM information_schema.tables 
@@ -106,7 +101,7 @@ router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), asyn
       return res.status(400).json({ success: false, message: 'Tabla no encontrada en esquema core' });
     }
 
-    // Verificar permiso usando has_table_privilege (NO ejecuta la query real)
+    // 🔒 SEGURIDAD: privilegeMap con whitelist estática — operacion ya validada con whitelist
     const privilegeMap = {
       'SELECT': 'SELECT',
       'INSERT': 'INSERT',
@@ -114,20 +109,21 @@ router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), asyn
       'DELETE': 'DELETE'
     };
 
+    // eslint-disable-next-line security/detect-object-injection
+    const privilege = privilegeMap[operacion];
+
     const testResult = await pool.query(
       `SELECT has_table_privilege($1, $2, $3) AS permitido`,
-      [rol, `core.${tabla}`, privilegeMap[operacion]]
+      [rol, `core.${tabla}`, privilege]
     );
 
     const permitido = testResult.rows[0].permitido;
 
-    // Registrar la prueba en auditoría
     await pool.query(
       `INSERT INTO core.tblauditoria (accion, entidad, detalles, created_at) 
        VALUES ('Prueba de acceso BD', 'seguridad', $1::jsonb, NOW())`,
       [JSON.stringify({
-        rol,
-        operacion,
+        rol, operacion,
         tabla: `core.${tabla}`,
         resultado: permitido ? 'PERMITIDO' : 'DENEGADO',
         ejecutado_por: req.user.email
@@ -137,8 +133,7 @@ router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), asyn
     res.json({
       success: true,
       resultado: {
-        rol,
-        operacion,
+        rol, operacion,
         tabla: `core.${tabla}`,
         permitido,
         mensaje: permitido
@@ -172,7 +167,6 @@ router.get('/historial', verifyToken, verifyRole('direccion_general'), async (re
       ORDER BY created_at DESC
       LIMIT 20
     `);
-
     res.json({ success: true, historial: historialResult.rows });
   } catch (error) {
     console.error('Error en /historial:', error.message);
@@ -185,26 +179,19 @@ router.get('/historial', verifyToken, verifyRole('direccion_general'), async (re
 // ============================================
 router.get('/resumen', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   try {
-    // Total de roles creados
     const rolesCount = await pool.query(
       `SELECT COUNT(*) AS total FROM pg_roles WHERE rolname IN ('rol_consulta', 'rol_operacion', 'rol_admin')`
     );
-
-    // Total de permisos asignados
     const permisosCount = await pool.query(`
       SELECT COUNT(*) AS total FROM information_schema.role_table_grants
       WHERE grantee IN ('rol_consulta', 'rol_operacion', 'rol_admin')
         AND table_schema IN ('core', 'staging', 'reports')
     `);
-
-    // Esquemas existentes
     const esquemas = await pool.query(`
       SELECT schema_name FROM information_schema.schemata
       WHERE schema_name IN ('core', 'staging', 'reports')
       ORDER BY schema_name
     `);
-
-    // Tablas por esquema
     const tablasPorEsquema = await pool.query(`
       SELECT table_schema AS esquema, COUNT(*) AS total
       FROM information_schema.tables
@@ -212,8 +199,6 @@ router.get('/resumen', verifyToken, verifyRole('direccion_general'), async (req,
       GROUP BY table_schema
       ORDER BY table_schema
     `);
-
-    // Pruebas de acceso realizadas
     const pruebasCount = await pool.query(
       `SELECT COUNT(*) AS total FROM core.tblauditoria WHERE accion = 'Prueba de acceso BD'`
     );

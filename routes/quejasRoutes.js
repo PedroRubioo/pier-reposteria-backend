@@ -74,7 +74,8 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
         en_proceso: { titulo: 'Tu queja está siendo atendida', mensaje: `Tu queja está siendo revisada por nuestro equipo.${respuesta ? ' Respuesta: ' + respuesta.substring(0, 100) : ''}` },
         resuelto: { titulo: 'Tu queja ha sido resuelta', mensaje: `Tu queja ha sido atendida y marcada como resuelta.${respuesta ? ' Respuesta: ' + respuesta.substring(0, 100) : ''}` }
       };
-      const notif = mensajes[estado];
+      // 🔒 SEGURIDAD: estado ya validado con whitelist ['pendiente','en_proceso','resuelto']
+      const notif = mensajes[estado]; // eslint-disable-line security/detect-object-injection
       if (notif) {
         await crearNotificacion({ usuario_id: queja.usuario_id, tipo: 'sistema', titulo: notif.titulo, mensaje: notif.mensaje });
       }

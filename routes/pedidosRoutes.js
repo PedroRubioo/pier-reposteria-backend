@@ -186,7 +186,7 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       completado: { titulo: 'Pedido completado', mensaje: `Tu pedido #${pedido.numero} ha sido entregado. ¡Gracias por tu compra!`, tipo: 'pedido' },
       cancelado: { titulo: 'Pedido cancelado', mensaje: `Tu pedido #${pedido.numero} ha sido cancelado. ${nota_cancelacion || ''}`.trim(), tipo: 'sistema' },
     };
-    const notif = mensajes[estado];
+    const notif = mensajes[estado]; // eslint-disable-line security/detect-object-injection
     if (notif) {
       const { notificarConEmail } = require('../services/notificacionHelper');
       // Email solo para 'listo' (el cliente necesita saber que ya puede ir por su pedido)

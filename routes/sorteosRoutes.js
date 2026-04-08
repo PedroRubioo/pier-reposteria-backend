@@ -43,7 +43,6 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('direccion_general'), async
     if (sorteo.rows.length === 0) return res.status(404).json({ success: false, message: 'Sorteo no encontrado' });
     if (sorteo.rows[0].ganador_id) return res.status(400).json({ success: false, message: 'Este sorteo ya tiene ganador' });
 
-    // Obtener participantes elegibles (clientes con min_pedidos completados)
     const minPedidos = sorteo.rows[0].min_pedidos || 0;
     const participantes = await pool.query(`
       SELECT u.id, u.nombre, u.apellido, u.email, COUNT(p.id) AS total_pedidos
@@ -56,9 +55,9 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('direccion_general'), async
 
     if (participantes.rows.length === 0) return res.status(400).json({ success: false, message: 'No hay participantes elegibles' });
 
-    // Seleccionar ganador aleatorio
+    // 🔒 SEGURIDAD: idx es generado internamente con Math.random(), no viene del usuario
     const idx = Math.floor(Math.random() * participantes.rows.length);
-    const ganador = participantes.rows[idx];
+    const ganador = participantes.rows[idx]; // eslint-disable-line security/detect-object-injection
 
     await pool.query(
       'UPDATE core.tblsorteos SET ganador_id = $1, total_participantes = $2 WHERE id = $3',

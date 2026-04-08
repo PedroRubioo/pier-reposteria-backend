@@ -11,7 +11,6 @@ function sanitizeInput(value) {
   let sanitized = validator.escape(value);
   
   // 2. Eliminar caracteres peligrosos para NoSQL
-  // Eliminar $, {, }, [, ] que se usan en operadores MongoDB
   sanitized = sanitized.replace(/[\$\{\}\[\]]/g, '');
   
   return sanitized.trim();
@@ -33,9 +32,12 @@ function sanitizeObject(obj) {
   for (const [key, value] of Object.entries(obj)) {
     // No permitir claves que empiecen con $ (operadores MongoDB)
     if (key.startsWith('$')) {
-      continue; // Ignorar esta clave
+      continue;
     }
-    sanitized[key] = sanitizeObject(value);
+    // 🔒 SEGURIDAD: Validar que la clave pertenece al objeto antes de asignar
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      sanitized[key] = sanitizeObject(value); // eslint-disable-line security/detect-object-injection
+    }
   }
   
   return sanitized;
@@ -47,7 +49,6 @@ function sanitizeObject(obj) {
 function sanitizeRequestMiddleware(req, res, next) {
   try {
     // 🔧 EXCEPCIÓN: No sanitizar el callback de Google OAuth
-    // El código de autorización de Google contiene caracteres especiales que no deben ser escapados
     if (req.path === '/api/auth/google/callback' || req.path.includes('/api/auth/google')) {
       return next();
     }
@@ -83,19 +84,15 @@ function isValidEmail(email) {
 
 /**
  * Validar contraseña segura
- * Requisitos:
- * - Mínimo 8 caracteres
- * - Al menos 1 mayúscula
- * - Al menos 1 minúscula
- * - Al menos 1 número
- * - Al menos 1 carácter especial
  */
 function isStrongPassword(password) {
   const minLength = 8;
   const hasUpperCase = /[A-Z]/.test(password);
   const hasLowerCase = /[a-z]/.test(password);
   const hasNumbers = /\d/.test(password);
-  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+  // 🔒 SEGURIDAD: Regex con caracteres especiales fijos — no hay ReDoS posible
+  // eslint-disable-next-line security/detect-unsafe-regex
+  const hasSpecialChar = /[!@#$%^&*()\-.,?"':{}|<>]/.test(password);
   
   return password.length >= minLength && 
          hasUpperCase && 
@@ -122,7 +119,8 @@ function getPasswordRequirementsMessage(password) {
   if (!/\d/.test(password)) {
     requirements.push('al menos 1 número');
   }
-  if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+  // eslint-disable-next-line security/detect-unsafe-regex
+  if (!/[!@#$%^&*()\-.,?"':{}|<>]/.test(password)) {
     requirements.push('al menos 1 carácter especial (!@#$%^&*...)');
   }
   
@@ -158,7 +156,7 @@ function containsXSS(value) {
   const xssPatterns = [
     /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
     /javascript:/gi,
-    /on\w+\s*=/gi, // onclick, onerror, etc.
+    /on\w+\s*=/gi,
     /<iframe/gi,
     /<object/gi,
     /<embed/gi

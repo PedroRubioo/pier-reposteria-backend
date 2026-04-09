@@ -355,6 +355,91 @@ jobs:
           curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:3001/api/csrf-token
           echo ""
 
+      - name: "IAST - Flujo 9: Path traversal"
+        run: |
+          echo "=== Flujo 9: Intento de Path Traversal ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            "http://localhost:3001/api/../../../../etc/passwd"
+          echo ""
+
+      - name: "IAST - Flujo 10: Headers maliciosos"
+        run: |
+          echo "=== Flujo 10: Headers HTTP maliciosos ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            http://localhost:3001/api/render-health \
+            -H "X-Forwarded-For: 127.0.0.1, <script>alert(1)</script>" \
+            -H "User-Agent: <script>alert(xss)</script>"
+          echo ""
+
+      - name: "IAST - Flujo 11: CORS origen no permitido"
+        run: |
+          echo "=== Flujo 11: Peticion CORS desde origen no permitido ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            http://localhost:3001/api/render-health \
+            -H "Origin: https://sitio-malicioso.com"
+          echo ""
+
+      - name: "IAST - Flujo 12: Rate limit - rafaga de peticiones"
+        run: |
+          echo "=== Flujo 12: Rate Limiting — rafaga de 10 peticiones ==="
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/api/render-health)
+            echo "Peticion $i: HTTP $STATUS"
+          done
+          echo ""
+
+      - name: "IAST - Flujo 13: Registro con email ya existente"
+        run: |
+          echo "=== Flujo 13: Registro duplicado ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            -X POST http://localhost:3001/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"nombre":"Test","apellido":"User","email":"pedro.rubio.test@gmail.com","password":"Test1234!","telefono":"7711234567"}'
+          echo ""
+
+      - name: "IAST - Flujo 14: Login con body vacio"
+        run: |
+          echo "=== Flujo 14: Body completamente vacio ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            -X POST http://localhost:3001/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{}'
+          echo ""
+
+      - name: "IAST - Flujo 15: Metodo HTTP no permitido"
+        run: |
+          echo "=== Flujo 15: Metodo DELETE en endpoint de login ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            -X DELETE http://localhost:3001/api/auth/login
+          echo ""
+
+      - name: "IAST - Flujo 16: Payload JSON gigante (DoS)"
+        run: |
+          echo "=== Flujo 16: Payload excesivamente grande ==="
+          PAYLOAD=$(python3 -c "import json; print(json.dumps({'email': 'a@b.com', 'password': 'x' * 100000}))")
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            -X POST http://localhost:3001/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+          echo ""
+
+      - name: "IAST - Flujo 17: Header Authorization con formato invalido"
+        run: |
+          echo "=== Flujo 17: Authorization malformado ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            http://localhost:3001/api/productos \
+            -H "Authorization: NotBearer xyz123"
+          echo ""
+
+      - name: "IAST - Flujo 18: Inyeccion NoSQL en login"
+        run: |
+          echo "=== Flujo 18: Intento de NoSQL Injection ==="
+          curl -s -w "\nHTTP Status: %{http_code}\n" \
+            -X POST http://localhost:3001/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":{"$gt":""},"password":{"$gt":""}}'
+          echo ""
+
       - name: Detener backend y capturar trazas
         run: |
           pkill -f "node --require ./iast-agent.js" || true

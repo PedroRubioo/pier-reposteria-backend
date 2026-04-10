@@ -178,6 +178,7 @@ const configuracionRoutes = require('./routes/configuracionRoutes');
 const reportesRoutes = require('./routes/reportesRoutes');
 const sorteosRoutes = require('./routes/sorteosRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
+const pagosRoutes = require('./routes/pagosRoutes');
 const monitoreoRoutes = require('./routes/monitoreoRoutes');
 
 
@@ -202,6 +203,7 @@ app.use('/api/configuracion', configuracionRoutes);
 app.use('/api/reportes', reportesRoutes);
 app.use('/api/sorteos', sorteosRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/pagos', pagosRoutes);
 app.use('/api/monitoreo', monitoreoRoutes);
 
 

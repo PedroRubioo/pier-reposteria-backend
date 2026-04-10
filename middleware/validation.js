@@ -8,17 +8,17 @@ const validator = require('validator');
 function sanitizeInput(value) {
   if (typeof value !== 'string') return value;
 
-  // 🔧 EXCEPCIÓN: No escapar URLs (Cloudinary, Google OAuth, etc.)
-  if (value.startsWith('http://') || value.startsWith('https://')) {
+  // No escapar URLs válidas (Cloudinary, Unsplash, etc.)
+  if (validator.isURL(value, { protocols: ['http', 'https'], require_protocol: true })) {
     return value.trim();
   }
 
   // 1. Eliminar etiquetas HTML (protección XSS)
   let sanitized = validator.escape(value);
-  
+
   // 2. Eliminar caracteres peligrosos para NoSQL
   sanitized = sanitized.replace(/[\$\{\}\[\]]/g, '');
-  
+
   return sanitized.trim();
 }
 

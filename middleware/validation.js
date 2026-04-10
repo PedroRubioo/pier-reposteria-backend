@@ -7,7 +7,12 @@ const validator = require('validator');
  */
 function sanitizeInput(value) {
   if (typeof value !== 'string') return value;
-  
+
+  // 🔧 EXCEPCIÓN: No escapar URLs (Cloudinary, Google OAuth, etc.)
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    return value.trim();
+  }
+
   // 1. Eliminar etiquetas HTML (protección XSS)
   let sanitized = validator.escape(value);
   

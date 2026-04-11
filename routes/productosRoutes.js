@@ -88,10 +88,12 @@ router.get('/productos', async (req, res) => {
       default: query += ` ORDER BY p.popular DESC, reviews DESC, p.nombre ASC`; break;
     }
 
-    const lim = parseInt(limite) || 50;
-    const off = parseInt(offset) || 0;
-    query += ` LIMIT $${pi} OFFSET $${pi + 1}`;
-    params.push(lim, off);
+    if (limite) {
+      const lim = parseInt(limite);
+      const off = parseInt(offset) || 0;
+      query += ` LIMIT $${pi} OFFSET $${pi + 1}`;
+      params.push(lim, off);
+    }
 
     const result = await pool.query(query, params);
     res.json({ success: true, productos: result.rows, total: result.rowCount });

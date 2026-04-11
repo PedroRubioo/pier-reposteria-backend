@@ -239,6 +239,19 @@ async function resetPassword(req, res) {
     const password_hash = await Usuario.hashPassword(nuevaPassword);
     await pool.query('UPDATE core.tblusuarios SET password_hash = $1, updated_at = NOW() WHERE id = $2', [password_hash, userResult.rows[0].id]);
 
+    // Notificar por email que la contraseña fue cambiada
+    try {
+      const { enviarEmailNotificacion } = require('../services/notificacionHelper');
+      await enviarEmailNotificacion({
+        email: email.toLowerCase(),
+        nombre: '',
+        asunto: 'Contraseña actualizada - Pier Repostería',
+        contenido: `<h2>🔐 Contraseña Actualizada</h2><p>Tu contraseña fue actualizada exitosamente el <strong>${new Date().toLocaleString('es-MX')}</strong>.</p><div class="highlight-box"><strong>⚠️ Si tú no realizaste este cambio</strong>, contacta al soporte de inmediato respondiendo a este correo.</div>`
+      });
+    } catch (emailErr) {
+      console.error('Error enviando notificación de cambio de contraseña:', emailErr.message);
+    }
+
     res.json({ success: true, message: 'Contraseña actualizada exitosamente' });
   } catch (error) {
     console.error('❌ Error restableciendo:', error.message);

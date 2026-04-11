@@ -149,7 +149,7 @@ router.get('/:id', verifyToken, async (req, res) => {
 router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { estado, limite, offset } = req.query;
-    let query = `SELECT p.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, u.email AS cliente_email, pg.estado AS estado_pago FROM core.tblpedidos p JOIN core.tblusuarios u ON p.usuario_id = u.id LEFT JOIN core.tblpagos pg ON pg.pedido_id = p.id WHERE 1=1`;
+    let query = `SELECT p.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, u.email AS cliente_email, pg.estado AS estado_pago, pg.stripe_payment_id, pg.monto_total AS monto_pago FROM core.tblpedidos p JOIN core.tblusuarios u ON p.usuario_id = u.id LEFT JOIN core.tblpagos pg ON pg.pedido_id = p.id WHERE 1=1`;
     const params = [];
     let pi = 1;
     if (estado) { query += ` AND p.estado = $${pi}`; params.push(estado); pi++; }

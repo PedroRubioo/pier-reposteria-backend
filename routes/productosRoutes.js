@@ -183,15 +183,14 @@ router.get('/productos-destacados', async (req, res) => {
 // Se reinicia cada semana (lunes a sábado)
 router.post('/actualizar-populares', async (req, res) => {
   try {
-    // Calcular inicio de semana (lunes)
+    // Calcular inicio de semana (domingo)
     const ahora = new Date();
-    const diaSemana = ahora.getDay(); // 0=domingo, 1=lunes
-    const diasDesdelunes = diaSemana === 0 ? 6 : diaSemana - 1;
+    const diaSemana = ahora.getDay(); // 0=domingo
     const inicioSemana = new Date(ahora);
-    inicioSemana.setDate(ahora.getDate() - diasDesdelunes);
+    inicioSemana.setDate(ahora.getDate() - diaSemana);
     inicioSemana.setHours(0, 0, 0, 0);
 
-    // Productos con 7+ compras desde el lunes
+    // Productos con 7+ compras desde el domingo
     const topResult = await pool.query(`
       SELECT pi.producto_id, SUM(pi.cantidad)::INTEGER as total_vendido
       FROM core.tblpedido_items pi
@@ -215,7 +214,7 @@ router.post('/actualizar-populares', async (req, res) => {
 
     res.json({
       success: true,
-      message: `${topIds.length} productos populares (7+ compras desde lunes ${inicioSemana.toLocaleDateString('es-MX')})`,
+      message: `${topIds.length} productos populares (7+ compras desde domingo ${inicioSemana.toLocaleDateString('es-MX')})`,
       productos_populares: topIds,
       desde: inicioSemana.toISOString()
     });

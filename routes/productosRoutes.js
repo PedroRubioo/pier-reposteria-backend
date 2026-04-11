@@ -179,18 +179,19 @@ router.get('/productos-destacados', async (req, res) => {
   }
 });
 
-// Actualizar populares: productos con 6+ compras desde el domingo de esta semana
-// Se ejecuta automáticamente al cargar productos y puede llamarse manualmente
+// Actualizar populares: productos con 7+ compras desde el lunes de esta semana
+// Se reinicia cada semana (lunes a sábado)
 router.post('/actualizar-populares', async (req, res) => {
   try {
-    // Calcular inicio de semana (domingo)
+    // Calcular inicio de semana (lunes)
     const ahora = new Date();
-    const diaSemana = ahora.getDay(); // 0=domingo
+    const diaSemana = ahora.getDay(); // 0=domingo, 1=lunes
+    const diasDesdelunes = diaSemana === 0 ? 6 : diaSemana - 1;
     const inicioSemana = new Date(ahora);
-    inicioSemana.setDate(ahora.getDate() - diaSemana);
+    inicioSemana.setDate(ahora.getDate() - diasDesdelunes);
     inicioSemana.setHours(0, 0, 0, 0);
 
-    // Productos con 6+ compras desde el domingo
+    // Productos con 7+ compras desde el lunes
     const topResult = await pool.query(`
       SELECT pi.producto_id, SUM(pi.cantidad)::INTEGER as total_vendido
       FROM core.tblpedido_items pi
@@ -198,7 +199,7 @@ router.post('/actualizar-populares', async (req, res) => {
       WHERE p.created_at >= $1
         AND p.estado NOT IN ('cancelado')
       GROUP BY pi.producto_id
-      HAVING SUM(pi.cantidad) >= 6
+      HAVING SUM(pi.cantidad) >= 7
       ORDER BY total_vendido DESC
     `, [inicioSemana.toISOString()]);
 
@@ -207,14 +208,14 @@ router.post('/actualizar-populares', async (req, res) => {
     // Quitar popular a todos
     await pool.query('UPDATE core.tblproductos SET popular = false, updated_at = NOW() WHERE popular = true');
 
-    // Marcar como populares los que tienen 6+ compras
+    // Marcar como populares los que tienen 7+ compras
     if (topIds.length > 0) {
       await pool.query(`UPDATE core.tblproductos SET popular = true, updated_at = NOW() WHERE id = ANY($1)`, [topIds]);
     }
 
     res.json({
       success: true,
-      message: `${topIds.length} productos populares (6+ compras desde domingo ${inicioSemana.toLocaleDateString('es-MX')})`,
+      message: `${topIds.length} productos populares (7+ compras desde lunes ${inicioSemana.toLocaleDateString('es-MX')})`,
       productos_populares: topIds,
       desde: inicioSemana.toISOString()
     });

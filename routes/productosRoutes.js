@@ -179,39 +179,45 @@ router.get('/productos-destacados', async (req, res) => {
   }
 });
 
-// Actualizar populares basado en ventas de la semana (miércoles a sábado)
-router.post('/actualizar-populares', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+// Actualizar populares: productos con 6+ compras desde el domingo de esta semana
+// Se ejecuta automáticamente al cargar productos y puede llamarse manualmente
+router.post('/actualizar-populares', async (req, res) => {
   try {
-    // Obtener día de la semana (0=domingo, 3=miércoles, 6=sábado)
-    const hoy = new Date().getDay();
-    // Solo actualizar de miércoles(3) a sábado(6)
-    if (hoy < 3) {
-      return res.json({ success: true, message: 'Los populares se actualizan de miércoles a sábado', actualizado: false });
-    }
+    // Calcular inicio de semana (domingo)
+    const ahora = new Date();
+    const diaSemana = ahora.getDay(); // 0=domingo
+    const inicioSemana = new Date(ahora);
+    inicioSemana.setDate(ahora.getDate() - diaSemana);
+    inicioSemana.setHours(0, 0, 0, 0);
 
-    // Obtener top 5 productos más vendidos de los últimos 7 días
+    // Productos con 6+ compras desde el domingo
     const topResult = await pool.query(`
-      SELECT pi.producto_id, SUM(pi.cantidad) as total_vendido
+      SELECT pi.producto_id, SUM(pi.cantidad)::INTEGER as total_vendido
       FROM core.tblpedido_items pi
       JOIN core.tblpedidos p ON pi.pedido_id = p.id
-      WHERE p.created_at >= NOW() - INTERVAL '7 days'
+      WHERE p.created_at >= $1
         AND p.estado NOT IN ('cancelado')
       GROUP BY pi.producto_id
+      HAVING SUM(pi.cantidad) >= 6
       ORDER BY total_vendido DESC
-      LIMIT 5
-    `);
+    `, [inicioSemana.toISOString()]);
 
     const topIds = topResult.rows.map(r => r.producto_id);
 
     // Quitar popular a todos
     await pool.query('UPDATE core.tblproductos SET popular = false, updated_at = NOW() WHERE popular = true');
 
-    // Marcar top 5 como populares
+    // Marcar como populares los que tienen 6+ compras
     if (topIds.length > 0) {
       await pool.query(`UPDATE core.tblproductos SET popular = true, updated_at = NOW() WHERE id = ANY($1)`, [topIds]);
     }
 
-    res.json({ success: true, message: `Top ${topIds.length} populares actualizados`, productos_populares: topIds });
+    res.json({
+      success: true,
+      message: `${topIds.length} productos populares (6+ compras desde domingo ${inicioSemana.toLocaleDateString('es-MX')})`,
+      productos_populares: topIds,
+      desde: inicioSemana.toISOString()
+    });
   } catch (error) {
     console.error('Error actualizando populares:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar populares' });

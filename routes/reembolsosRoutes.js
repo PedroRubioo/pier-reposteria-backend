@@ -75,8 +75,8 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
     query += ` WHERE id=$${pi} RETURNING *`;
     params.push(req.params.id);
 
-    // Si se aprueba, actualizar estado del pago
-    if (estado === 'procesado') {
+    // Si se aprueba o procesa, actualizar estado del pago
+    if (estado === 'aprobado' || estado === 'procesado') {
       const reembolso = await pool.query('SELECT pedido_id FROM core.tblreembolsos WHERE id = $1', [req.params.id]);
       if (reembolso.rows.length > 0) {
         await pool.query('UPDATE core.tblpagos SET estado = $1, reembolsado_at = NOW() WHERE pedido_id = $2', ['reembolsado', reembolso.rows[0].pedido_id]);

@@ -92,19 +92,11 @@ function isValidEmail(email) {
  * Validar contraseña segura
  */
 function isStrongPassword(password) {
-  const minLength = 8;
-  const hasUpperCase = /[A-Z]/.test(password);
-  const hasLowerCase = /[a-z]/.test(password);
+  const minLength = 6;
+  const hasLetters = /[a-zA-Z]/.test(password);
   const hasNumbers = /\d/.test(password);
-  // 🔒 SEGURIDAD: Regex con caracteres especiales fijos — no hay ReDoS posible
-  // eslint-disable-next-line security/detect-unsafe-regex
-  const hasSpecialChar = /[!@#$%^&*()\-.,?"':{}|<>]/.test(password);
-  
-  return password.length >= minLength && 
-         hasUpperCase && 
-         hasLowerCase && 
-         hasNumbers && 
-         hasSpecialChar;
+
+  return password.length >= minLength && hasLetters && hasNumbers;
 }
 
 /**
@@ -112,28 +104,21 @@ function isStrongPassword(password) {
  */
 function getPasswordRequirementsMessage(password) {
   const requirements = [];
-  
-  if (password.length < 8) {
-    requirements.push('mínimo 8 caracteres');
+
+  if (password.length < 6) {
+    requirements.push('mínimo 6 caracteres');
   }
-  if (!/[A-Z]/.test(password)) {
-    requirements.push('al menos 1 mayúscula');
-  }
-  if (!/[a-z]/.test(password)) {
-    requirements.push('al menos 1 minúscula');
+  if (!/[a-zA-Z]/.test(password)) {
+    requirements.push('al menos 1 letra');
   }
   if (!/\d/.test(password)) {
     requirements.push('al menos 1 número');
   }
-  // eslint-disable-next-line security/detect-unsafe-regex
-  if (!/[!@#$%^&*()\-.,?"':{}|<>]/.test(password)) {
-    requirements.push('al menos 1 carácter especial (!@#$%^&*...)');
-  }
-  
+
   if (requirements.length === 0) {
     return null;
   }
-  
+
   return `La contraseña debe tener: ${requirements.join(', ')}`;
 }
 

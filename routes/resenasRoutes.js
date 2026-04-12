@@ -6,6 +6,27 @@ const { verifyToken, verifyRole } = require('../middleware/auth');
 
 const PALABRAS_INAPROPIADAS = ['mierda','puta','puto','pendejo','pendeja','idiota','estupido','estúpido','cabron','cabrón','chinga','verga','culo','joder','jodido','mamada','pinche','culero','culera','baboso','babosa','imbecil','imbécil','tarado','tarada','zorra','bastardo','maldito','maldita','carajo','coño','huevon','huevón','maricon','maricón','perra','perro hijue','gonorrea','malparido','malparida','hp','hdp','wtf','ctm','ptm'];
 
+// Reseñas destacadas (público) — para landing page
+router.get('/destacadas', async (req, res) => {
+  try {
+    const limite = Math.min(parseInt(req.query.limite) || 3, 10);
+    const minRating = parseInt(req.query.min_rating) || 5;
+    const result = await pool.query(`
+      SELECT r.id, r.rating, r.titulo, r.comentario, r.verificada, r.created_at,
+        u.nombre AS autor_nombre, u.apellido AS autor_apellido
+      FROM core.tblresenas r
+      JOIN core.tblusuarios u ON r.usuario_id = u.id
+      WHERE r.estado = 'aprobada' AND r.rating >= $1
+      ORDER BY r.verificada DESC, r.util_count DESC, r.created_at DESC
+      LIMIT $2
+    `, [minRating, limite]);
+    res.json({ success: true, resenas: result.rows });
+  } catch (error) {
+    console.error('Error GET /resenas/destacadas:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener reseñas destacadas' });
+  }
+});
+
 // Reseñas de un producto (público)
 router.get('/producto/:productoId', async (req, res) => {
   try {

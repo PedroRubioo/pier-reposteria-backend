@@ -127,7 +127,7 @@ router.get('/productos/:id', async (req, res) => {
 
     // Reseñas aprobadas
     const resenas = await pool.query(`
-      SELECT r.id, r.usuario_id, r.rating, r.titulo, r.comentario, r.fotos, r.util_count, r.verificada, r.created_at,
+      SELECT r.id, r.usuario_id, r.rating, r.titulo, r.comentario, r.fotos, r.util_count, r.verificada, r.respuesta_negocio, r.created_at,
         u.nombre AS autor_nombre, u.apellido AS autor_apellido
       FROM core.tblresenas r
       JOIN core.tblusuarios u ON r.usuario_id = u.id

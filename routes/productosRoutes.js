@@ -348,4 +348,66 @@ router.put('/categorias/:id', verifyToken, verifyRole('empleado', 'gerencia', 'd
   }
 });
 
+// ── Opciones por categoría (tipos y sabores dinámicos) ──
+router.get('/categoria-opciones/:categoriaId', async (req, res) => {
+  try {
+    const { categoriaId } = req.params;
+    const result = await pool.query(
+      'SELECT id, tipo_opcion, nombre FROM core.tblcategoria_opciones WHERE categoria_id = $1 ORDER BY nombre',
+      [categoriaId]
+    );
+    const tipos = result.rows.filter(r => r.tipo_opcion === 'tipo').map(r => ({ id: r.id, nombre: r.nombre }));
+    const sabores = result.rows.filter(r => r.tipo_opcion === 'sabor').map(r => ({ id: r.id, nombre: r.nombre }));
+    res.json({ success: true, tipos, sabores });
+  } catch (error) {
+    console.error('Error GET /categoria-opciones:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener opciones' });
+  }
+});
+
+router.post('/categoria-opciones', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const { categoria_id, tipo_opcion, nombre } = req.body;
+    if (!categoria_id || !tipo_opcion || !nombre) return res.status(400).json({ success: false, message: 'Todos los campos son requeridos' });
+    if (!['tipo', 'sabor'].includes(tipo_opcion)) return res.status(400).json({ success: false, message: 'tipo_opcion debe ser "tipo" o "sabor"' });
+    const result = await pool.query(
+      'INSERT INTO core.tblcategoria_opciones (categoria_id, tipo_opcion, nombre) VALUES ($1, $2, $3) RETURNING id, nombre',
+      [categoria_id, tipo_opcion, nombre.trim()]
+    );
+    res.status(201).json({ success: true, opcion: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ success: false, message: 'Esta opción ya existe para esta categoría' });
+    console.error('Error POST /categoria-opciones:', error.message);
+    res.status(500).json({ success: false, message: 'Error al crear opción' });
+  }
+});
+
+router.put('/categoria-opciones/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre) return res.status(400).json({ success: false, message: 'Nombre es requerido' });
+    const result = await pool.query(
+      'UPDATE core.tblcategoria_opciones SET nombre = $1 WHERE id = $2 RETURNING id, nombre',
+      [nombre.trim(), req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Opción no encontrada' });
+    res.json({ success: true, opcion: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ success: false, message: 'Ya existe una opción con ese nombre' });
+    console.error('Error PUT /categoria-opciones:', error.message);
+    res.status(500).json({ success: false, message: 'Error al actualizar opción' });
+  }
+});
+
+router.delete('/categoria-opciones/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM core.tblcategoria_opciones WHERE id = $1 RETURNING id', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Opción no encontrada' });
+    res.json({ success: true, message: 'Opción eliminada' });
+  } catch (error) {
+    console.error('Error DELETE /categoria-opciones:', error.message);
+    res.status(500).json({ success: false, message: 'Error al eliminar opción' });
+  }
+});
+
 module.exports = router;

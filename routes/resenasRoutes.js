@@ -7,20 +7,40 @@ const { verifyToken, verifyRole } = require('../middleware/auth');
 const PALABRAS_INAPROPIADAS = ['mierda','puta','puto','pendejo','pendeja','idiota','estupido','estúpido','cabron','cabrón','chinga','verga','culo','joder','jodido','mamada','pinche','culero','culera','baboso','babosa','imbecil','imbécil','tarado','tarada','zorra','bastardo','maldito','maldita','carajo','coño','huevon','huevón','maricon','maricón','perra','perro hijue','gonorrea','malparido','malparida','hp','hdp','wtf','ctm','ptm'];
 
 // Reseñas destacadas (público) — para landing page
+// Filtra: 5 estrellas, aprobadas, sin palabras inapropiadas, distintos autores, incluye producto
 router.get('/destacadas', async (req, res) => {
   try {
     const limite = Math.min(parseInt(req.query.limite) || 3, 10);
     const minRating = parseInt(req.query.min_rating) || 5;
+    // Traer más de las necesarias para filtrar por contenido positivo
     const result = await pool.query(`
-      SELECT r.id, r.rating, r.titulo, r.comentario, r.verificada, r.created_at,
-        u.nombre AS autor_nombre, u.apellido AS autor_apellido
+      SELECT r.id, r.producto_id, r.rating, r.titulo, r.comentario, r.verificada, r.created_at,
+        u.nombre AS autor_nombre, u.apellido AS autor_apellido,
+        p.nombre AS producto_nombre
       FROM core.tblresenas r
       JOIN core.tblusuarios u ON r.usuario_id = u.id
+      JOIN core.tblproductos p ON r.producto_id = p.id
       WHERE r.estado = 'aprobada' AND r.rating >= $1
       ORDER BY r.verificada DESC, r.util_count DESC, r.created_at DESC
       LIMIT $2
-    `, [minRating, limite]);
-    res.json({ success: true, resenas: result.rows });
+    `, [minRating, limite * 3]);
+
+    // Filtrar: sin palabras inapropiadas, comentario coherente (min 10 chars), distintos autores
+    const autoresVistos = new Set();
+    const filtradas = [];
+    for (const r of result.rows) {
+      const texto = `${r.titulo || ''} ${r.comentario}`.toLowerCase();
+      const tieneInapropiado = PALABRAS_INAPROPIADAS.some(p => texto.includes(p));
+      if (tieneInapropiado) continue;
+      if (r.comentario.length < 10) continue;
+      const autorKey = `${r.autor_nombre}-${r.autor_apellido}`;
+      if (autoresVistos.has(autorKey)) continue;
+      autoresVistos.add(autorKey);
+      filtradas.push(r);
+      if (filtradas.length >= limite) break;
+    }
+
+    res.json({ success: true, resenas: filtradas });
   } catch (error) {
     console.error('Error GET /resenas/destacadas:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener reseñas destacadas' });

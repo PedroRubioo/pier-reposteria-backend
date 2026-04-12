@@ -4,6 +4,8 @@ const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 
+const PALABRAS_INAPROPIADAS = ['mierda','puta','puto','pendejo','pendeja','idiota','estupido','estúpido','cabron','cabrón','chinga','verga','culo','joder','jodido','mamada','pinche','culero','culera','baboso','babosa','imbecil','imbécil','tarado','tarada','zorra','bastardo','maldito','maldita','carajo','coño','huevon','huevón','maricon','maricón','perra','perro hijue','gonorrea','malparido','malparida','hp','hdp','wtf','ctm','ptm'];
+
 // Reseñas de un producto (público)
 router.get('/producto/:productoId', async (req, res) => {
   try {
@@ -44,7 +46,9 @@ router.post('/', verifyToken, async (req, res) => {
     );
     if (yaReseno.rows.length > 0) return res.status(400).json({ success: false, message: 'Ya dejaste una reseña para este producto' });
 
-    const auto_aprobada = rating >= 4;
+    const textoCompleto = `${titulo || ''} ${comentario}`.toLowerCase();
+    const contieneInapropiado = PALABRAS_INAPROPIADAS.some(p => textoCompleto.includes(p));
+    const auto_aprobada = !contieneInapropiado && rating >= 4;
     const estado = auto_aprobada ? 'aprobada' : 'pendiente';
 
     const result = await pool.query(
@@ -52,7 +56,13 @@ router.post('/', verifyToken, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW()) RETURNING *`,
       [producto_id, req.user.userId, rating, titulo || null, comentario, fotos ? JSON.stringify(fotos) : null, estado, auto_aprobada, verificada]
     );
-    res.status(201).json({ success: true, resena: result.rows[0], message: auto_aprobada ? 'Reseña publicada' : 'Reseña en revisión' });
+    res.status(201).json({
+      success: true,
+      resena: result.rows[0],
+      message: contieneInapropiado
+        ? 'Tu reseña requiere validación manual antes de publicarse'
+        : (auto_aprobada ? 'Reseña publicada' : 'Reseña en revisión')
+    });
   } catch (error) {
     console.error('Error POST /resenas:', error.message);
     res.status(500).json({ success: false, message: 'Error al crear reseña' });

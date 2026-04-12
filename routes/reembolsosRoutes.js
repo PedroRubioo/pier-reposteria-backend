@@ -48,7 +48,9 @@ router.get('/mis-reembolsos', verifyToken, async (req, res) => {
 router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { estado } = req.query;
-    let query = `SELECT r.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, p.numero AS pedido_numero
+    let query = `SELECT r.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, p.numero AS pedido_numero,
+      EXTRACT(DAY FROM NOW() - r.created_at)::INTEGER AS dias_desde_compra,
+      CASE WHEN EXTRACT(EPOCH FROM NOW() - r.created_at) <= 18000 THEN true ELSE false END AS cumple_politica
       FROM core.tblreembolsos r JOIN core.tblusuarios u ON r.usuario_id = u.id JOIN core.tblpedidos p ON r.pedido_id = p.id`;
     const params = [];
     if (estado) { query += ' WHERE r.estado = $1'; params.push(estado); }

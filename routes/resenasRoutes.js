@@ -139,6 +139,22 @@ router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gener
 router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { estado, motivo_rechazo, respuesta_negocio } = req.body;
+    // Si solo envían respuesta_negocio sin estado, actualizar solo la respuesta
+    if (!estado && respuesta_negocio) {
+      const result = await pool.query(
+        'UPDATE core.tblresenas SET respuesta_negocio=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
+        [respuesta_negocio, req.params.id]
+      );
+      if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
+      const resena = result.rows[0];
+      // Notificar al cliente
+      try {
+        const { notificarConEmail } = require('../services/notificacionHelper');
+        const prodInfo = await pool.query('SELECT nombre FROM core.tblproductos WHERE id = $1', [resena.producto_id]);
+        await notificarConEmail({ usuario_id: resena.usuario_id, tipo: 'resena', titulo: 'Pier respondió a tu reseña', mensaje: `Respondimos a tu reseña del producto "${prodInfo.rows[0]?.nombre || ''}": ${respuesta_negocio.substring(0, 100)}` });
+      } catch (notifErr) { console.error('Error notificación respuesta:', notifErr.message); }
+      return res.json({ success: true, resena });
+    }
     if (!['aprobada', 'rechazada'].includes(estado)) return res.status(400).json({ success: false, message: 'Estado: aprobada o rechazada' });
     const result = await pool.query(
       `UPDATE core.tblresenas SET estado=$1, motivo_rechazo=$2, respuesta_negocio=$3, updated_at=NOW() WHERE id=$4 RETURNING *`,

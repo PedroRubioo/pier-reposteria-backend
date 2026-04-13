@@ -44,7 +44,7 @@ router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gener
     // Auto-vencer promociones expiradas
     await pool.query(`UPDATE core.tblpromociones SET estado = 'vencida' WHERE estado = 'activa' AND fecha_fin IS NOT NULL AND fecha_fin < NOW()`);
     const result = await pool.query(`
-      SELECT pr.*, p.nombre AS producto_nombre
+      SELECT pr.*, p.nombre AS producto_nombre, p.imagen_url AS producto_imagen, p.precio_chico, p.precio_grande
       FROM core.tblpromociones pr LEFT JOIN core.tblproductos p ON pr.producto_id = p.id
       ORDER BY pr.created_at DESC
     `);

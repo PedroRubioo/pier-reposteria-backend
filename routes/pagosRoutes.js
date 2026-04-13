@@ -11,11 +11,13 @@ router.post('/crear-intent', verifyToken, async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    // Obtener items del carrito para calcular total
+    // Obtener items del carrito con promociones activas
     const carrito = await pool.query(
-      `SELECT ci.*, p.nombre, p.precio_chico, p.precio_grande, p.activo
+      `SELECT ci.*, p.nombre, p.precio_chico, p.precio_grande, p.activo,
+        pr.descuento_porcentaje AS promo_descuento, pr.precio_oferta AS promo_precio_oferta
        FROM core.tblcarrito_items ci
        JOIN core.tblproductos p ON ci.producto_id = p.id
+       LEFT JOIN core.tblpromociones pr ON pr.producto_id = p.id AND pr.estado = 'activa' AND (pr.fecha_fin IS NULL OR pr.fecha_fin > NOW())
        WHERE ci.usuario_id = $1`,
       [userId]
     );
@@ -29,9 +31,12 @@ router.post('/crear-intent', verifyToken, async (req, res) => {
       if (!item.activo) {
         return res.status(400).json({ success: false, message: `"${item.nombre}" ya no está disponible` });
       }
-      const precio = (item.tamano === 'grande' && item.precio_grande)
+      let precio = (item.tamano === 'grande' && item.precio_grande)
         ? parseFloat(item.precio_grande)
         : parseFloat(item.precio_chico);
+      // Aplicar descuento de promoción
+      if (item.promo_precio_oferta) precio = parseFloat(item.promo_precio_oferta);
+      else if (item.promo_descuento) precio = Math.round(precio * (1 - parseFloat(item.promo_descuento) / 100));
       total += precio * item.cantidad;
     }
 

@@ -4,27 +4,40 @@ const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken } = require('../middleware/auth');
 
-// Listar items del carrito
+// Listar items del carrito (con descuentos de promociones activas)
 router.get('/', verifyToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const result = await pool.query(`
-      SELECT 
+      SELECT
         ci.id AS carrito_item_id, ci.cantidad, ci.tamano, ci.created_at AS agregado_el,
         p.id AS producto_id, p.nombre, p.descripcion, p.precio_chico, p.precio_grande,
         p.imagen_url, p.stock_online, p.activo,
         c.nombre AS categoria,
         CASE WHEN ci.tamano = 'grande' AND p.precio_grande IS NOT NULL THEN p.precio_grande ELSE p.precio_chico END AS precio_unitario,
-        CASE WHEN ci.tamano = 'grande' AND p.precio_grande IS NOT NULL THEN p.precio_grande * ci.cantidad ELSE p.precio_chico * ci.cantidad END AS subtotal
+        pr.descuento_porcentaje AS promo_descuento, pr.precio_oferta AS promo_precio_oferta, pr.tipo AS promo_tipo, pr.nombre_temporada AS promo_nombre
       FROM core.tblcarrito_items ci
       JOIN core.tblproductos p ON ci.producto_id = p.id
       JOIN core.tblcategorias c ON p.categoria_id = c.id
+      LEFT JOIN core.tblpromociones pr ON pr.producto_id = p.id AND pr.estado = 'activa' AND (pr.fecha_fin IS NULL OR pr.fecha_fin > NOW())
       WHERE ci.usuario_id = $1
       ORDER BY ci.created_at DESC
     `, [userId]);
 
-    const items = result.rows;
-    const total = items.reduce((sum, i) => sum + parseFloat(i.subtotal), 0);
+    const items = result.rows.map(i => {
+      const precioBase = parseFloat(i.precio_unitario);
+      let precioFinal = precioBase;
+      if (i.promo_precio_oferta) precioFinal = parseFloat(i.promo_precio_oferta);
+      else if (i.promo_descuento) precioFinal = Math.round(precioBase * (1 - parseFloat(i.promo_descuento) / 100));
+      return {
+        ...i,
+        precio_original: precioBase,
+        precio_unitario: precioFinal,
+        subtotal: precioFinal * i.cantidad,
+        tiene_descuento: precioFinal < precioBase,
+      };
+    });
+    const total = items.reduce((sum, i) => sum + i.subtotal, 0);
     const total_items = items.reduce((sum, i) => sum + i.cantidad, 0);
 
     res.json({ success: true, carrito: { items, total: Math.round(total * 100) / 100, total_items } });

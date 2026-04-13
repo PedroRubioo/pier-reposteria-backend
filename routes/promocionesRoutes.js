@@ -41,6 +41,8 @@ router.post('/validar-codigo', verifyToken, async (req, res) => {
 // CRUD (empleado+)
 router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
+    // Auto-vencer promociones expiradas
+    await pool.query(`UPDATE core.tblpromociones SET estado = 'vencida' WHERE estado = 'activa' AND fecha_fin IS NOT NULL AND fecha_fin < NOW()`);
     const result = await pool.query(`
       SELECT pr.*, p.nombre AS producto_nombre
       FROM core.tblpromociones pr LEFT JOIN core.tblproductos p ON pr.producto_id = p.id

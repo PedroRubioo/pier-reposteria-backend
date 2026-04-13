@@ -34,9 +34,8 @@ router.post('/crear-intent', verifyToken, async (req, res) => {
       let precio = (item.tamano === 'grande' && item.precio_grande)
         ? parseFloat(item.precio_grande)
         : parseFloat(item.precio_chico);
-      // Aplicar descuento de promoción
-      if (item.promo_precio_oferta) precio = parseFloat(item.promo_precio_oferta);
-      else if (item.promo_descuento) precio = Math.round(precio * (1 - parseFloat(item.promo_descuento) / 100));
+      // Aplicar descuento de promoción (porcentaje sobre precio del tamaño)
+      if (item.promo_descuento) precio = Math.round(precio * (1 - parseFloat(item.promo_descuento) / 100));
       total += precio * item.cantidad;
     }
 

@@ -27,8 +27,7 @@ router.get('/', verifyToken, async (req, res) => {
     const items = result.rows.map(i => {
       const precioBase = parseFloat(i.precio_unitario);
       let precioFinal = precioBase;
-      if (i.promo_precio_oferta) precioFinal = parseFloat(i.promo_precio_oferta);
-      else if (i.promo_descuento) precioFinal = Math.round(precioBase * (1 - parseFloat(i.promo_descuento) / 100));
+      if (i.promo_descuento) precioFinal = Math.round(precioBase * (1 - parseFloat(i.promo_descuento) / 100));
       return {
         ...i,
         precio_original: precioBase,

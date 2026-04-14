@@ -17,11 +17,11 @@ function getGitHubHeaders() {
 router.get('/list', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   try {
     const response = await axios.get(
-      `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts`,
+      `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts?per_page=100`,
       { headers: getGitHubHeaders() }
     );
     const backups = response.data.artifacts
-      .filter(a => a.name.startsWith('neon-backup'))
+      .filter(a => a.name.startsWith('neon-backup') && !a.expired)
       .map(a => ({
         id: a.id,
         nombre: a.name,

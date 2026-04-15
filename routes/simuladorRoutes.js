@@ -32,10 +32,11 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
     const { productoId } = req.params;
     const meses = parseInt(req.query.meses) || 6;
 
+    // Ventas separadas por tamaño
     const result = await pool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', pd.created_at), 'YYYY-MM') AS mes,
-        TO_CHAR(DATE_TRUNC('month', pd.created_at), 'Mon YYYY') AS mes_label,
+        COALESCE(pi.tamano, 'chico') AS tamano,
         COALESCE(SUM(pi.cantidad), 0)::INTEGER AS unidades,
         COALESCE(SUM(pi.subtotal), 0)::NUMERIC(10,2) AS ingresos
       FROM core.tblpedido_items pi
@@ -43,51 +44,71 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       WHERE pi.producto_id = $1
         AND pd.estado NOT IN ('cancelado')
         AND pd.created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '${meses} months'
-      GROUP BY DATE_TRUNC('month', pd.created_at)
+      GROUP BY DATE_TRUNC('month', pd.created_at), pi.tamano
       ORDER BY mes ASC
     `, [productoId]);
 
+    // Obtener info del producto
+    const productoInfo = await pool.query('SELECT precio_chico, precio_grande FROM core.tblproductos WHERE id = $1', [productoId]);
+    const precioChico = productoInfo.rows[0] ? parseFloat(productoInfo.rows[0].precio_chico) : 0;
+    const precioGrande = productoInfo.rows[0]?.precio_grande ? parseFloat(productoInfo.rows[0].precio_grande) : null;
+    const tieneDosPrecios = precioGrande !== null;
+
     // Rellenar meses vacíos
-    const ventasPorMes = [];
     const ahora = new Date();
+    const ventasChico = [];
+    const ventasGrande = [];
+    const ventasTotal = [];
+
     for (let i = meses - 1; i >= 0; i--) {
       const fecha = new Date(ahora.getFullYear(), ahora.getMonth() - i, 1);
       const mesKey = `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, '0')}`;
       const mesLabel = fecha.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' });
-      const encontrado = result.rows.find(r => r.mes === mesKey);
-      ventasPorMes.push({
-        mes: mesKey,
-        mes_label: mesLabel,
-        unidades: encontrado ? parseInt(encontrado.unidades) : 0,
-        ingresos: encontrado ? parseFloat(encontrado.ingresos) : 0,
-      });
+
+      const chicoData = result.rows.find(r => r.mes === mesKey && r.tamano === 'chico');
+      const grandeData = result.rows.find(r => r.mes === mesKey && r.tamano === 'grande');
+
+      const chico = { mes: mesKey, mes_label: mesLabel, unidades: chicoData ? parseInt(chicoData.unidades) : 0, ingresos: chicoData ? parseFloat(chicoData.ingresos) : 0 };
+      const grande = { mes: mesKey, mes_label: mesLabel, unidades: grandeData ? parseInt(grandeData.unidades) : 0, ingresos: grandeData ? parseFloat(grandeData.ingresos) : 0 };
+
+      ventasChico.push(chico);
+      ventasGrande.push(grande);
+      ventasTotal.push({ mes: mesKey, mes_label: mesLabel, unidades: chico.unidades + grande.unidades, ingresos: chico.ingresos + grande.ingresos });
     }
 
-    // Predicción simple: promedio de los últimos 3 meses con tendencia
-    const ultimos3 = ventasPorMes.slice(-3).map(v => v.unidades);
-    const promedio = ultimos3.reduce((a, b) => a + b, 0) / (ultimos3.length || 1);
+    // Predicción por tamaño
+    const calcPred = (ventas, precio) => {
+      const u3 = ventas.slice(-3).map(v => v.unidades);
+      const prom = u3.reduce((a, b) => a + b, 0) / (u3.length || 1);
+      const tend = u3.length >= 2 ? u3[u3.length - 1] - u3[u3.length - 2] : 0;
+      const pred = Math.max(0, Math.round(prom + tend * 0.5));
+      return { unidades: pred, ingresos_estimados: Math.round(pred * precio), tendencia_valor: tend };
+    };
 
-    // Tendencia: diferencia entre último y penúltimo
-    const tendencia = ultimos3.length >= 2 ? ultimos3[ultimos3.length - 1] - ultimos3[ultimos3.length - 2] : 0;
-    const prediccion = Math.max(0, Math.round(promedio + tendencia * 0.5));
-
-    // Obtener precio para calcular ingreso estimado
-    const productoInfo = await pool.query('SELECT precio_chico FROM core.tblproductos WHERE id = $1', [productoId]);
-    const precio = productoInfo.rows[0] ? parseFloat(productoInfo.rows[0].precio_chico) : 0;
+    const predChico = calcPred(ventasChico, precioChico);
+    const predGrande = tieneDosPrecios ? calcPred(ventasGrande, precioGrande) : null;
+    const predTotal = { unidades: predChico.unidades + (predGrande?.unidades || 0), ingresos_estimados: predChico.ingresos_estimados + (predGrande?.ingresos_estimados || 0) };
+    const tendTotal = predChico.tendencia_valor + (predGrande?.tendencia_valor || 0);
 
     res.json({
       success: true,
-      ventas_mensuales: ventasPorMes,
+      tiene_dos_precios: tieneDosPrecios,
+      ventas_chico: ventasChico,
+      ventas_grande: tieneDosPrecios ? ventasGrande : null,
+      ventas_total: ventasTotal,
       prediccion: {
-        unidades: prediccion,
-        ingresos_estimados: Math.round(prediccion * precio),
-        tendencia: tendencia > 0 ? 'subiendo' : tendencia < 0 ? 'bajando' : 'estable',
-        tendencia_valor: tendencia,
+        total: predTotal,
+        chico: predChico,
+        grande: predGrande,
+        tendencia: tendTotal > 0 ? 'subiendo' : tendTotal < 0 ? 'bajando' : 'estable',
+        tendencia_valor: tendTotal,
       },
       resumen: {
-        total_unidades: ventasPorMes.reduce((a, v) => a + v.unidades, 0),
-        total_ingresos: ventasPorMes.reduce((a, v) => a + v.ingresos, 0),
-        promedio_mensual: Math.round(promedio),
+        total_unidades: ventasTotal.reduce((a, v) => a + v.unidades, 0),
+        total_ingresos: ventasTotal.reduce((a, v) => a + v.ingresos, 0),
+        promedio_mensual: Math.round(ventasTotal.reduce((a, v) => a + v.unidades, 0) / meses),
+        chico: { unidades: ventasChico.reduce((a, v) => a + v.unidades, 0), ingresos: ventasChico.reduce((a, v) => a + v.ingresos, 0) },
+        grande: tieneDosPrecios ? { unidades: ventasGrande.reduce((a, v) => a + v.unidades, 0), ingresos: ventasGrande.reduce((a, v) => a + v.ingresos, 0) } : null,
       }
     });
   } catch (error) {

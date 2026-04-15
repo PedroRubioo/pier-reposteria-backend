@@ -76,19 +76,58 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       ventasTotal.push({ mes: mesKey, mes_label: mesLabel, unidades: chico.unidades + grande.unidades, ingresos: chico.ingresos + grande.ingresos });
     }
 
-    // Predicción por tamaño
+    // ── Modelo: Ley de Crecimiento/Decrecimiento Exponencial ──
+    // dT/dt = KT  →  T(t) = T₀ · e^(Kt)
+    // K = ln(T_f / T₀) / n
+
+    // Calcular moda de un array
+    const calcModa = (arr) => {
+      const freq = {};
+      arr.forEach(v => { freq[v] = (freq[v] || 0) + 1; });
+      let maxFreq = 0, moda = arr[0] || 0;
+      Object.entries(freq).forEach(([val, count]) => { if (count > maxFreq) { maxFreq = count; moda = Number(val); } });
+      return moda;
+    };
+
+    // Predicción exponencial por tamaño
     const calcPred = (ventas, precio) => {
-      const u3 = ventas.slice(-3).map(v => v.unidades);
-      const prom = u3.reduce((a, b) => a + b, 0) / (u3.length || 1);
-      const tend = u3.length >= 2 ? u3[u3.length - 1] - u3[u3.length - 2] : 0;
-      const pred = Math.max(0, Math.round(prom + tend * 0.5));
-      return { unidades: pred, ingresos_estimados: Math.round(pred * precio), tendencia_valor: tend };
+      const unidades = ventas.map(v => v.unidades);
+      const n = unidades.length;
+
+      // Promedio aritmético: x̄ = Σ Tᵢ / n
+      const promedio = unidades.reduce((a, b) => a + b, 0) / (n || 1);
+
+      // Moda
+      const moda = calcModa(unidades);
+
+      // T₀ = primer mes con ventas > 0, T_f = último mes
+      const T0 = unidades.find(u => u > 0) || 1;
+      const Tf = unidades[n - 1] || 1;
+      const periodos = n - 1 || 1;
+
+      // K = ln(T_f / T₀) / n  (constante de crecimiento/decrecimiento)
+      const K = (T0 > 0 && Tf > 0) ? Math.log(Tf / T0) / periodos : 0;
+
+      // T(t) = T₀ · e^(Kt) donde t = n (siguiente mes)
+      const prediccion = Math.max(0, Math.round(Tf * Math.exp(K)));
+
+      return {
+        unidades: prediccion,
+        ingresos_estimados: Math.round(prediccion * precio),
+        K: Math.round(K * 10000) / 10000,
+        promedio: Math.round(promedio * 100) / 100,
+        moda: moda,
+        T0: T0,
+        Tf: Tf,
+      };
     };
 
     const predChico = calcPred(ventasChico, precioChico);
     const predGrande = tieneDosPrecios ? calcPred(ventasGrande, precioGrande) : null;
-    const predTotal = { unidades: predChico.unidades + (predGrande?.unidades || 0), ingresos_estimados: predChico.ingresos_estimados + (predGrande?.ingresos_estimados || 0) };
-    const tendTotal = predChico.tendencia_valor + (predGrande?.tendencia_valor || 0);
+    const predTotal = calcPred(ventasTotal, precioChico);
+
+    // Tendencia basada en K total
+    const Ktotal = predTotal.K;
 
     res.json({
       success: true,
@@ -97,16 +136,18 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       ventas_grande: tieneDosPrecios ? ventasGrande : null,
       ventas_total: ventasTotal,
       prediccion: {
-        total: predTotal,
+        total: { unidades: predTotal.unidades, ingresos_estimados: predChico.ingresos_estimados + (predGrande?.ingresos_estimados || 0) },
         chico: predChico,
         grande: predGrande,
-        tendencia: tendTotal > 0 ? 'subiendo' : tendTotal < 0 ? 'bajando' : 'estable',
-        tendencia_valor: tendTotal,
+        tendencia: Ktotal > 0.01 ? 'subiendo' : Ktotal < -0.01 ? 'bajando' : 'estable',
+        tendencia_valor: Ktotal,
+        K_total: Ktotal,
       },
       resumen: {
         total_unidades: ventasTotal.reduce((a, v) => a + v.unidades, 0),
         total_ingresos: ventasTotal.reduce((a, v) => a + v.ingresos, 0),
-        promedio_mensual: Math.round(ventasTotal.reduce((a, v) => a + v.unidades, 0) / meses),
+        promedio_mensual: predTotal.promedio,
+        moda_mensual: predTotal.moda,
         chico: { unidades: ventasChico.reduce((a, v) => a + v.unidades, 0), ingresos: ventasChico.reduce((a, v) => a + v.ingresos, 0) },
         grande: tieneDosPrecios ? { unidades: ventasGrande.reduce((a, v) => a + v.unidades, 0), ingresos: ventasGrande.reduce((a, v) => a + v.ingresos, 0) } : null,
       }

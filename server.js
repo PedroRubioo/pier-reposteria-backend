@@ -187,6 +187,8 @@ const monitoreoRoutes = require('./routes/monitoreoRoutes');
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', googleAuthRoutes);
 app.use('/api/backups', backupRoutes);
+const simuladorRoutes = require('./routes/simuladorRoutes');
+app.use('/api/simulador', simuladorRoutes);
 app.use('/api/seguridad-bd', seguridadBDRoutes);
 app.use('/api', productosRoutes);
 app.use('/api/favoritos', favoritosRoutes);

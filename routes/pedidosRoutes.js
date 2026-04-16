@@ -154,10 +154,8 @@ router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gener
     let pi = 1;
     if (estado) { query += ` AND p.estado = $${pi}`; params.push(estado); pi++; }
     query += ` ORDER BY p.created_at DESC`;
-    if (limite) {
-      query += ` LIMIT $${pi} OFFSET $${pi + 1}`;
-      params.push(parseInt(limite), parseInt(offset) || 0);
-    }
+    query += ` LIMIT $${pi} OFFSET $${pi + 1}`;
+    params.push(parseInt(String(limite)) || 100, parseInt(String(offset)) || 0);
     const result = await pool.query(query, params);
     res.json({ success: true, pedidos: result.rows });
   } catch (error) {

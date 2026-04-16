@@ -40,7 +40,9 @@ const actualizarPopularesAuto = async () => {
       SELECT pi.producto_id FROM core.tblpedido_items pi
       JOIN core.tblpedidos p ON pi.pedido_id = p.id
       WHERE p.created_at >= $1 AND p.estado NOT IN ('cancelado')
-      GROUP BY pi.producto_id HAVING SUM(pi.cantidad) >= 7
+      GROUP BY pi.producto_id
+      ORDER BY SUM(pi.cantidad) DESC
+      LIMIT 5
     `, [inicioSemana.toISOString()]);
     const topIds = topResult.rows.map(r => r.producto_id);
     await pool.query('UPDATE core.tblproductos SET popular = false, updated_at = NOW() WHERE popular = true');
@@ -218,7 +220,7 @@ router.post('/actualizar-populares', async (req, res) => {
     inicioSemana.setDate(ahora.getDate() - diaSemana);
     inicioSemana.setHours(0, 0, 0, 0);
 
-    // Productos con 7+ compras desde el domingo
+    // Top 5 productos más vendidos de la semana
     const topResult = await pool.query(`
       SELECT pi.producto_id, SUM(pi.cantidad)::INTEGER as total_vendido
       FROM core.tblpedido_items pi
@@ -226,8 +228,8 @@ router.post('/actualizar-populares', async (req, res) => {
       WHERE p.created_at >= $1
         AND p.estado NOT IN ('cancelado')
       GROUP BY pi.producto_id
-      HAVING SUM(pi.cantidad) >= 7
       ORDER BY total_vendido DESC
+      LIMIT 5
     `, [inicioSemana.toISOString()]);
 
     const topIds = topResult.rows.map(r => r.producto_id);

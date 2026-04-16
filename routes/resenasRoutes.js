@@ -232,4 +232,30 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
   }
 });
 
+// Editar reseña propia (cliente)
+router.put('/:id', verifyToken, async (req, res) => {
+  try {
+    const { rating, titulo, comentario } = req.body;
+    if (!rating || !comentario) return res.status(400).json({ success: false, message: 'Rating y comentario son requeridos' });
+    // Verificar que la reseña pertenece al usuario
+    const resena = await pool.query('SELECT id, usuario_id FROM core.tblresenas WHERE id = $1', [req.params.id]);
+    if (resena.rows.length === 0) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
+    if (resena.rows[0].usuario_id !== req.user.userId) return res.status(403).json({ success: false, message: 'No puedes editar esta reseña' });
+
+    const texto = `${titulo || ''} ${comentario}`.toLowerCase();
+    const tieneInapropiado = PALABRAS_INAPROPIADAS.some(p => texto.includes(p));
+    const nuevoEstado = tieneInapropiado ? 'pendiente' : 'aprobada';
+
+    const result = await pool.query(
+      'UPDATE core.tblresenas SET rating=$1, titulo=$2, comentario=$3, estado=$4, updated_at=NOW() WHERE id=$5 RETURNING *',
+      [rating, titulo || null, comentario, nuevoEstado, req.params.id]
+    );
+    const mensaje = tieneInapropiado ? 'Tu reseña fue actualizada y requiere validación manual antes de publicarse' : 'Reseña actualizada';
+    res.json({ success: true, resena: result.rows[0], message: mensaje });
+  } catch (error) {
+    console.error('Error PUT /resenas/:id:', error.message);
+    res.status(500).json({ success: false, message: 'Error al actualizar reseña' });
+  }
+});
+
 module.exports = router;

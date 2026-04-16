@@ -56,10 +56,10 @@ router.get('/productos', async (req, res) => {
   try {
     // Auto-actualizar populares en segundo plano
     actualizarPopularesAuto();
-    const { categoria, busqueda, sabor, tamano, tipo, precio_min, precio_max, ordenar, popular, limite, offset } = req.query;
+    const { categoria, busqueda, sabor, tamano, tipo, precio_min, precio_max, ordenar, popular, limite, offset, incluir_inactivos } = req.query;
 
     let query = `
-      SELECT 
+      SELECT
         p.id, p.nombre, p.descripcion, p.precio_chico, p.precio_grande,
         p.imagen_url, p.imagen_public_id, p.imagenes, p.ingredientes,
         p.sabor, p.tamano, p.tipo, p.popular, p.es_nuevo,
@@ -70,7 +70,7 @@ router.get('/productos', async (req, res) => {
       FROM core.tblproductos p
       JOIN core.tblcategorias c ON p.categoria_id = c.id
       LEFT JOIN core.tblresenas r ON r.producto_id = p.id AND r.estado = 'aprobada'
-      WHERE p.activo = true AND c.activo = true
+      WHERE c.activo = true ${incluir_inactivos === 'true' ? '' : 'AND p.activo = true'}
     `;
     const params = [];
     let pi = 1;

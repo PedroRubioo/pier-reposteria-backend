@@ -24,8 +24,36 @@ router.get('/categorias', async (req, res) => {
 });
 
 // Listar productos con filtros
+// Auto-actualizar populares (máximo 1 vez por hora)
+let ultimaActualizacionPopulares = 0;
+const actualizarPopularesAuto = async () => {
+  const ahora = Date.now();
+  if (ahora - ultimaActualizacionPopulares < 3600000) return; // 1 hora
+  ultimaActualizacionPopulares = ahora;
+  try {
+    const fecha = new Date();
+    const diaSemana = fecha.getDay();
+    const inicioSemana = new Date(fecha);
+    inicioSemana.setDate(fecha.getDate() - diaSemana);
+    inicioSemana.setHours(0, 0, 0, 0);
+    const topResult = await pool.query(`
+      SELECT pi.producto_id FROM core.tblpedido_items pi
+      JOIN core.tblpedidos p ON pi.pedido_id = p.id
+      WHERE p.created_at >= $1 AND p.estado NOT IN ('cancelado')
+      GROUP BY pi.producto_id HAVING SUM(pi.cantidad) >= 7
+    `, [inicioSemana.toISOString()]);
+    const topIds = topResult.rows.map(r => r.producto_id);
+    await pool.query('UPDATE core.tblproductos SET popular = false, updated_at = NOW() WHERE popular = true');
+    if (topIds.length > 0) {
+      await pool.query('UPDATE core.tblproductos SET popular = true, updated_at = NOW() WHERE id = ANY($1)', [topIds]);
+    }
+  } catch (err) { console.error('Error auto-popular:', err.message); }
+};
+
 router.get('/productos', async (req, res) => {
   try {
+    // Auto-actualizar populares en segundo plano
+    actualizarPopularesAuto();
     const { categoria, busqueda, sabor, tamano, tipo, precio_min, precio_max, ordenar, popular, limite, offset } = req.query;
 
     let query = `

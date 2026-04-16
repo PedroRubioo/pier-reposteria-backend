@@ -214,7 +214,7 @@ class GeneralRateLimiter {
   }
 }
 
-const generalLimiter = new GeneralRateLimiter(1000, 15 * 60 * 1000);
+const generalLimiter = new GeneralRateLimiter(3000, 15 * 60 * 1000);
 
 // Limpiar cada 10 minutos
 setInterval(() => {

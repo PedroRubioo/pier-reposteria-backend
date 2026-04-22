@@ -158,4 +158,203 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ANÁLISIS DE VENTAS (independiente del modelo predictivo)
+// GET /api/simulador/analisis-ventas?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&categoria_id=X
+// ═══════════════════════════════════════════════════════════════════
+router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+  try {
+    const { desde, hasta, categoria_id } = req.query;
+
+    if (!desde || !hasta) {
+      return res.status(400).json({ success: false, message: 'Parametros desde y hasta son requeridos' });
+    }
+
+    const filtroCategoria = categoria_id ? 'AND p.categoria_id = $3' : '';
+    const paramsBase = [desde, hasta];
+    if (categoria_id) paramsBase.push(categoria_id);
+
+    // Rango anterior (misma duración) para comparativo
+    const dias = Math.ceil((new Date(hasta) - new Date(desde)) / (1000 * 60 * 60 * 24)) + 1;
+    const desdeAnterior = new Date(new Date(desde).getTime() - dias * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const hastaAnterior = new Date(new Date(desde).getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    // 1. KPIs del período actual
+    const kpis = await pool.query(`
+      SELECT
+        COUNT(DISTINCT pd.id)::INTEGER AS total_pedidos,
+        COALESCE(SUM(DISTINCT pd.total), 0)::NUMERIC(10,2) AS ingresos_totales,
+        COALESCE(SUM(pi.cantidad), 0)::INTEGER AS unidades_vendidas,
+        COALESCE(ROUND(AVG(DISTINCT pd.total), 2), 0)::NUMERIC(10,2) AS ticket_promedio
+      FROM core.tblpedidos pd
+      LEFT JOIN core.tblpedido_items pi ON pi.pedido_id = pd.id
+      ${categoria_id ? 'LEFT JOIN core.tblproductos p ON pi.producto_id = p.id' : ''}
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${filtroCategoria}
+    `, paramsBase);
+
+    // 2. KPIs del período anterior (para comparativo)
+    const kpisAnterior = await pool.query(`
+      SELECT
+        COUNT(DISTINCT pd.id)::INTEGER AS total_pedidos,
+        COALESCE(SUM(DISTINCT pd.total), 0)::NUMERIC(10,2) AS ingresos_totales,
+        COALESCE(SUM(pi.cantidad), 0)::INTEGER AS unidades_vendidas
+      FROM core.tblpedidos pd
+      LEFT JOIN core.tblpedido_items pi ON pi.pedido_id = pd.id
+      ${categoria_id ? 'LEFT JOIN core.tblproductos p ON pi.producto_id = p.id' : ''}
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${categoria_id ? 'AND p.categoria_id = $3' : ''}
+    `, categoria_id ? [desdeAnterior, hastaAnterior, categoria_id] : [desdeAnterior, hastaAnterior]);
+
+    // 3. Ventas por día
+    const ventasPorDia = await pool.query(`
+      SELECT
+        pd.created_at::date AS dia,
+        COUNT(DISTINCT pd.id)::INTEGER AS pedidos,
+        COALESCE(SUM(pi.cantidad), 0)::INTEGER AS unidades,
+        COALESCE(SUM(DISTINCT pd.total), 0)::NUMERIC(10,2) AS ingresos
+      FROM core.tblpedidos pd
+      LEFT JOIN core.tblpedido_items pi ON pi.pedido_id = pd.id
+      ${categoria_id ? 'LEFT JOIN core.tblproductos p ON pi.producto_id = p.id' : ''}
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${filtroCategoria}
+      GROUP BY pd.created_at::date
+      ORDER BY dia ASC
+    `, paramsBase);
+
+    // 4. Ventas por día de la semana (0=Domingo, 6=Sábado)
+    const ventasPorDiaSemana = await pool.query(`
+      SELECT
+        EXTRACT(DOW FROM pd.created_at)::INTEGER AS dia_num,
+        COUNT(DISTINCT pd.id)::INTEGER AS pedidos,
+        COALESCE(SUM(pi.cantidad), 0)::INTEGER AS unidades,
+        COALESCE(SUM(DISTINCT pd.total), 0)::NUMERIC(10,2) AS ingresos
+      FROM core.tblpedidos pd
+      LEFT JOIN core.tblpedido_items pi ON pi.pedido_id = pd.id
+      ${categoria_id ? 'LEFT JOIN core.tblproductos p ON pi.producto_id = p.id' : ''}
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${filtroCategoria}
+      GROUP BY EXTRACT(DOW FROM pd.created_at)
+      ORDER BY dia_num
+    `, paramsBase);
+
+    // 5. Ventas por hora
+    const ventasPorHora = await pool.query(`
+      SELECT
+        EXTRACT(HOUR FROM pd.created_at)::INTEGER AS hora,
+        COUNT(DISTINCT pd.id)::INTEGER AS pedidos
+      FROM core.tblpedidos pd
+      ${categoria_id ? 'LEFT JOIN core.tblpedido_items pi ON pi.pedido_id = pd.id LEFT JOIN core.tblproductos p ON pi.producto_id = p.id' : ''}
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${filtroCategoria}
+      GROUP BY EXTRACT(HOUR FROM pd.created_at)
+      ORDER BY hora
+    `, paramsBase);
+
+    // 6. Ventas por categoría
+    const ventasPorCategoria = await pool.query(`
+      SELECT
+        c.nombre AS categoria,
+        COALESCE(SUM(pi.cantidad), 0)::INTEGER AS unidades,
+        COALESCE(SUM(pi.subtotal), 0)::NUMERIC(10,2) AS ingresos
+      FROM core.tblpedido_items pi
+      JOIN core.tblpedidos pd ON pi.pedido_id = pd.id
+      JOIN core.tblproductos p ON pi.producto_id = p.id
+      JOIN core.tblcategorias c ON p.categoria_id = c.id
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${filtroCategoria}
+      GROUP BY c.nombre
+      ORDER BY unidades DESC
+    `, paramsBase);
+
+    // 7. Top 10 productos del período
+    const topProductos = await pool.query(`
+      SELECT
+        p.id, p.nombre, p.imagen_url, c.nombre AS categoria,
+        SUM(pi.cantidad)::INTEGER AS unidades,
+        SUM(pi.subtotal)::NUMERIC(10,2) AS ingresos
+      FROM core.tblpedido_items pi
+      JOIN core.tblpedidos pd ON pi.pedido_id = pd.id
+      JOIN core.tblproductos p ON pi.producto_id = p.id
+      JOIN core.tblcategorias c ON p.categoria_id = c.id
+      WHERE pd.created_at::date BETWEEN $1 AND $2
+        AND pd.estado != 'cancelado'
+        ${filtroCategoria}
+      GROUP BY p.id, p.nombre, p.imagen_url, c.nombre
+      ORDER BY unidades DESC
+      LIMIT 10
+    `, paramsBase);
+
+    // 8. Distribución por estado de pedido
+    const porEstado = await pool.query(`
+      SELECT estado, COUNT(*)::INTEGER AS total
+      FROM core.tblpedidos
+      WHERE created_at::date BETWEEN $1 AND $2
+      GROUP BY estado
+    `, [desde, hasta]);
+
+    // 9. Día con mayor venta
+    const diaTop = ventasPorDia.rows.reduce((max, d) =>
+      parseFloat(d.ingresos) > parseFloat(max?.ingresos || 0) ? d : max, null);
+
+    // 10. Productos sin ventas en el período (activos pero con 0 ventas)
+    const productosSinVentas = await pool.query(`
+      SELECT p.id, p.nombre, c.nombre AS categoria
+      FROM core.tblproductos p
+      JOIN core.tblcategorias c ON p.categoria_id = c.id
+      WHERE p.activo = true
+        ${categoria_id ? 'AND p.categoria_id = $3' : ''}
+        AND p.id NOT IN (
+          SELECT DISTINCT pi.producto_id
+          FROM core.tblpedido_items pi
+          JOIN core.tblpedidos pd ON pi.pedido_id = pd.id
+          WHERE pd.created_at::date BETWEEN $1 AND $2
+            AND pd.estado != 'cancelado'
+            AND pi.producto_id IS NOT NULL
+        )
+      ORDER BY p.nombre
+      LIMIT 20
+    `, categoria_id ? [desde, hasta, categoria_id] : [desde, hasta]);
+
+    // Variaciones vs período anterior
+    const varPct = (actual, anterior) => {
+      const a = parseFloat(actual) || 0;
+      const b = parseFloat(anterior) || 0;
+      if (b === 0) return a > 0 ? 100 : 0;
+      return Math.round(((a - b) / b) * 100 * 10) / 10;
+    };
+
+    res.json({
+      success: true,
+      periodo: { desde, hasta, desde_anterior: desdeAnterior, hasta_anterior: hastaAnterior },
+      kpis: {
+        total_pedidos: kpis.rows[0].total_pedidos,
+        ingresos_totales: parseFloat(kpis.rows[0].ingresos_totales),
+        unidades_vendidas: kpis.rows[0].unidades_vendidas,
+        ticket_promedio: parseFloat(kpis.rows[0].ticket_promedio),
+        var_pedidos: varPct(kpis.rows[0].total_pedidos, kpisAnterior.rows[0].total_pedidos),
+        var_ingresos: varPct(kpis.rows[0].ingresos_totales, kpisAnterior.rows[0].ingresos_totales),
+        var_unidades: varPct(kpis.rows[0].unidades_vendidas, kpisAnterior.rows[0].unidades_vendidas),
+      },
+      ventas_por_dia: ventasPorDia.rows,
+      ventas_por_dia_semana: ventasPorDiaSemana.rows,
+      ventas_por_hora: ventasPorHora.rows,
+      ventas_por_categoria: ventasPorCategoria.rows,
+      top_productos: topProductos.rows,
+      por_estado: porEstado.rows,
+      dia_top: diaTop,
+      productos_sin_ventas: productosSinVentas.rows,
+    });
+  } catch (error) {
+    console.error('Error GET /simulador/analisis-ventas:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener analisis de ventas' });
+  }
+});
+
 module.exports = router;

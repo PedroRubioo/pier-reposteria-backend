@@ -90,7 +90,8 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       return moda;
     };
 
-    // Predicción exponencial por tamaño
+    // Predicción exponencial por tamaño — misma fórmula (K = ln(Tf/T0)/n)
+    // Extendida para devolver 3 meses en vez de 1
     const calcPred = (ventas, precio) => {
       const unidades = ventas.map(v => v.unidades);
       const n = unidades.length;
@@ -109,12 +110,17 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       // K = ln(T_f / T₀) / n  (constante de crecimiento/decrecimiento)
       const K = (T0 > 0 && Tf > 0) ? Math.log(Tf / T0) / periodos : 0;
 
-      // T(t) = T₀ · e^(Kt) donde t = n (siguiente mes)
-      const prediccion = Math.max(0, Math.round(Tf * Math.exp(K)));
+      // T(t) = T_f · e^(K·t) → t=1,2,3 para los 3 meses siguientes
+      // Es equivalente a T₀ · e^(K·(n+t)) que es la fórmula del Excel
+      const predMeses = [1, 2, 3].map(t => {
+        const u = Math.max(0, Math.round(Tf * Math.exp(K * t)));
+        return { offset: t, unidades: u, ingresos_estimados: Math.round(u * precio) };
+      });
 
       return {
-        unidades: prediccion,
-        ingresos_estimados: Math.round(prediccion * precio),
+        predicciones: predMeses, // array de 3 meses
+        unidades: predMeses[0].unidades, // compatibilidad: mes 1
+        ingresos_estimados: predMeses[0].ingresos_estimados,
         K: Math.round(K * 10000) / 10000,
         promedio: Math.round(promedio * 100) / 100,
         moda: moda,
@@ -122,6 +128,20 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
         Tf: Tf,
       };
     };
+
+    // Calcular labels para los 3 meses de predicción (siguientes al último histórico)
+    const ultimoMes = ventasTotal[ventasTotal.length - 1];
+    const calcLabelsFuturo = () => {
+      if (!ultimoMes) return [];
+      const [yyyy, mm] = ultimoMes.mes.split('-').map(Number);
+      return [1, 2, 3].map(t => {
+        const fecha = new Date(yyyy, mm - 1 + t, 1);
+        const key = `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, '0')}`;
+        const label = fecha.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' });
+        return { mes: key, mes_label: label };
+      });
+    };
+    const labelsFuturo = calcLabelsFuturo();
 
     const predChico = calcPred(ventasChico, precioChico);
     const predGrande = tieneDosPrecios ? calcPred(ventasGrande, precioGrande) : null;
@@ -140,6 +160,15 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
         total: { unidades: predTotal.unidades, ingresos_estimados: predChico.ingresos_estimados + (predGrande?.ingresos_estimados || 0) },
         chico: predChico,
         grande: predGrande,
+        // Meses combinados (chico+grande) para los 3 meses futuros
+        meses_futuro: predTotal.predicciones.map((p, i) => ({
+          ...labelsFuturo[i],
+          offset: p.offset,
+          unidades: p.unidades,
+          unidades_chico: predChico.predicciones[i]?.unidades || 0,
+          unidades_grande: predGrande?.predicciones[i]?.unidades || 0,
+          ingresos_estimados: (predChico.predicciones[i]?.ingresos_estimados || 0) + (predGrande?.predicciones[i]?.ingresos_estimados || 0),
+        })),
         tendencia: Ktotal > 0.01 ? 'subiendo' : Ktotal < -0.01 ? 'bajando' : 'estable',
         tendencia_valor: Ktotal,
         K_total: Ktotal,

@@ -27,13 +27,43 @@ router.get('/productos-ranking', verifyToken, verifyRole('direccion_general'), a
   }
 });
 
-// Ventas mensuales de un producto (últimos 6 meses)
+// Ventas mensuales de un producto
+// Parametros opcionales: meses=N (default 6) o desde/hasta (YYYY-MM-DD) para rango custom
 router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   try {
     const { productoId } = req.params;
+    const { desde, hasta } = req.query;
     const meses = parseInt(req.query.meses) || 6;
 
-    // Ventas separadas por tamaño
+    // Determinar rango de meses a consultar
+    // Si hay desde/hasta, usar esos; si no, ultimos N meses desde hoy
+    const ahora = new Date();
+    let mesInicioFecha, mesFinFecha;
+    if (desde && hasta) {
+      const d = new Date(desde);
+      const h = new Date(hasta);
+      mesInicioFecha = new Date(d.getFullYear(), d.getMonth(), 1);
+      mesFinFecha = new Date(h.getFullYear(), h.getMonth(), 1);
+    } else {
+      mesInicioFecha = new Date(ahora.getFullYear(), ahora.getMonth() - (meses - 1), 1);
+      mesFinFecha = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
+    }
+
+    // Generar lista de meses en el rango
+    const mesesList = [];
+    const cursor = new Date(mesInicioFecha);
+    while (cursor <= mesFinFecha) {
+      const mesKey = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
+      const mesLabel = cursor.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' });
+      mesesList.push({ mes: mesKey, mes_label: mesLabel });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    // Query de ventas en ese rango
+    const sqlInicio = `${mesInicioFecha.getFullYear()}-${String(mesInicioFecha.getMonth() + 1).padStart(2, '0')}-01`;
+    const sqlFinExclusivo = new Date(mesFinFecha.getFullYear(), mesFinFecha.getMonth() + 1, 1);
+    const sqlFin = `${sqlFinExclusivo.getFullYear()}-${String(sqlFinExclusivo.getMonth() + 1).padStart(2, '0')}-01`;
+
     const result = await pool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', pd.created_at), 'YYYY-MM') AS mes,
@@ -44,10 +74,11 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       JOIN core.tblpedidos pd ON pi.pedido_id = pd.id
       WHERE pi.producto_id = $1
         AND pd.estado NOT IN ('cancelado')
-        AND pd.created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '${meses} months'
+        AND pd.created_at >= $2::date
+        AND pd.created_at < $3::date
       GROUP BY DATE_TRUNC('month', pd.created_at), pi.tamano
       ORDER BY mes ASC
-    `, [productoId]);
+    `, [productoId, sqlInicio, sqlFin]);
 
     // Obtener info del producto
     const productoInfo = await pool.query('SELECT precio_chico, precio_grande FROM core.tblproductos WHERE id = $1', [productoId]);
@@ -55,17 +86,12 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
     const precioGrande = productoInfo.rows[0]?.precio_grande ? parseFloat(productoInfo.rows[0].precio_grande) : null;
     const tieneDosPrecios = precioGrande !== null;
 
-    // Rellenar meses vacíos
-    const ahora = new Date();
+    // Rellenar meses con datos (o ceros)
     const ventasChico = [];
     const ventasGrande = [];
     const ventasTotal = [];
 
-    for (let i = meses - 1; i >= 0; i--) {
-      const fecha = new Date(ahora.getFullYear(), ahora.getMonth() - i, 1);
-      const mesKey = `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, '0')}`;
-      const mesLabel = fecha.toLocaleDateString('es-MX', { month: 'short', year: 'numeric' });
-
+    for (const { mes: mesKey, mes_label: mesLabel } of mesesList) {
       const chicoData = result.rows.find(r => r.mes === mesKey && r.tamano === 'chico');
       const grandeData = result.rows.find(r => r.mes === mesKey && r.tamano === 'grande');
 

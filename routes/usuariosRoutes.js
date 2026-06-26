@@ -27,7 +27,10 @@ router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async 
 router.get('/:id', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, nombre, apellido, email, telefono, rol, activo, email_verificado, avatar_url, puesto, permisos, google_id, created_at, updated_at, ultimo_acceso FROM core.tblusuarios WHERE id = $1',
+      `SELECT id, nombre, apellido, email, telefono, rol, activo, email_verificado, avatar_url, puesto, permisos, google_id, created_at, updated_at, ultimo_acceso,
+              codigo_empleado, intentos_pin_fallidos, pin_bloqueado_hasta, pin_actualizado_at,
+              (pin_hash IS NOT NULL) AS tiene_pin
+         FROM core.tblusuarios WHERE id = $1`,
       [req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });

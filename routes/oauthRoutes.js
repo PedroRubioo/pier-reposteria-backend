@@ -22,6 +22,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
 const ALEXA_CLIENT_ID = process.env.ALEXA_CLIENT_ID || 'alexa-pier';
 const ALEXA_CLIENT_SECRET = process.env.ALEXA_CLIENT_SECRET || '';
 
+// Callback de Google para el flow de Account Linking (NO el de la web normal)
+const OAUTH_GOOGLE_CALLBACK = process.env.OAUTH_GOOGLE_CALLBACK_URL
+  || 'https://pier-reposteria-backend.onrender.com/api/oauth/google/callback';
+
 // Hosts de redirect_uri permitidos por Amazon Alexa
 // https://developer.amazon.com/en-US/docs/alexa/account-linking/configure-authorization-code-grant.html
 const ALLOWED_REDIRECT_HOSTS = [
@@ -138,7 +142,10 @@ router.get('/google', (req, res, next) => {
   }
 
   req.session.alexaLinking = { client_id, redirect_uri, state: state || null };
-  passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
+  passport.authenticate('google', {
+    scope: ['profile', 'email'],
+    callbackURL: OAUTH_GOOGLE_CALLBACK,
+  })(req, res, next);
 });
 
 // =====================================================================
@@ -147,7 +154,10 @@ router.get('/google', (req, res, next) => {
 // y redirige a Alexa.
 // =====================================================================
 router.get('/google/callback',
-  passport.authenticate('google', { failureRedirect: '/api/oauth/authorize?error=google_auth_failed' }),
+  passport.authenticate('google', {
+    failureRedirect: '/api/oauth/authorize?error=google_auth_failed',
+    callbackURL: OAUTH_GOOGLE_CALLBACK,
+  }),
   async (req, res) => {
     try {
       const alexaLinking = req.session.alexaLinking;

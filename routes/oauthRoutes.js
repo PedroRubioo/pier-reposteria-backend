@@ -142,10 +142,7 @@ router.get('/google', (req, res, next) => {
   }
 
   req.session.alexaLinking = { client_id, redirect_uri, state: state || null };
-  passport.authenticate('google', {
-    scope: ['profile', 'email'],
-    callbackURL: OAUTH_GOOGLE_CALLBACK,
-  })(req, res, next);
+  passport.authenticate('google-alexa', { scope: ['profile', 'email'] })(req, res, next);
 });
 
 // =====================================================================
@@ -154,9 +151,8 @@ router.get('/google', (req, res, next) => {
 // y redirige a Alexa.
 // =====================================================================
 router.get('/google/callback',
-  passport.authenticate('google', {
+  passport.authenticate('google-alexa', {
     failureRedirect: '/api/oauth/authorize?error=google_auth_failed',
-    callbackURL: OAUTH_GOOGLE_CALLBACK,
   }),
   async (req, res) => {
     console.log('🔗 [oauth/google/callback] entered');

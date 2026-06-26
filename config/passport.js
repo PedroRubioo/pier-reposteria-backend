@@ -139,4 +139,79 @@ passport.deserializeUser(async (id, done) => {
 
 console.log('✅ Google OAuth Strategy configurado correctamente (PostgreSQL)');
 
+// =====================================================================
+// SEGUNDA STRATEGY para Account Linking de Alexa
+// Mismo Google client, distinto callbackURL fijo. Evita conflictos con
+// el strategy 'google' (que es para login web normal).
+// =====================================================================
+const OAUTH_ALEXA_CALLBACK = process.env.OAUTH_GOOGLE_CALLBACK_URL
+  || 'https://pier-reposteria-backend.onrender.com/api/oauth/google/callback';
+
+passport.use('google-alexa', new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: OAUTH_ALEXA_CALLBACK,
+    scope: ['profile', 'email'],
+  },
+  async function(accessToken, refreshToken, profile, done) {
+    try {
+      console.log('🔗 [google-alexa] Procesando OAuth para:', profile.emails[0].value);
+
+      let result = await pool.query(
+        'SELECT * FROM core.tblusuarios WHERE google_id = $1',
+        [profile.id]
+      );
+      let usuarioDoc = result.rows[0];
+
+      if (usuarioDoc) {
+        await pool.query(
+          'UPDATE core.tblusuarios SET ultimo_acceso = NOW() WHERE id = $1',
+          [usuarioDoc.id]
+        );
+        const usuario = new Usuario(usuarioDoc);
+        return done(null, usuario.toJSON());
+      }
+
+      result = await pool.query(
+        'SELECT * FROM core.tblusuarios WHERE email = $1',
+        [profile.emails[0].value.toLowerCase()]
+      );
+      usuarioDoc = result.rows[0];
+
+      if (usuarioDoc) {
+        await pool.query(
+          'UPDATE core.tblusuarios SET google_id = $1, email_verificado = true, ultimo_acceso = NOW() WHERE id = $2',
+          [profile.id, usuarioDoc.id]
+        );
+        usuarioDoc.google_id = profile.id;
+        const usuario = new Usuario(usuarioDoc);
+        return done(null, usuario.toJSON());
+      }
+
+      // Nuevo usuario
+      const nombre = profile.name?.givenName || profile.displayName?.split(' ')[0] || 'Usuario';
+      const apellido = profile.name?.familyName || profile.displayName?.split(' ').slice(1).join(' ') || 'Usuario';
+      const password_hash = await Usuario.hashPassword('google-oauth-' + profile.id);
+
+      const insertResult = await pool.query(
+        `INSERT INTO core.tblusuarios
+         (nombre, apellido, email, password_hash, telefono, rol, activo, email_verificado, google_id, created_at, updated_at, ultimo_acceso)
+         VALUES ($1, $2, $3, $4, $5, 'cliente', true, true, $6, NOW(), NOW(), NOW())
+         RETURNING *`,
+        [nombre, apellido, profile.emails[0].value.toLowerCase(), password_hash, '0000000000', profile.id]
+      );
+      const nuevoUsuario = insertResult.rows[0];
+      console.log('✅ [google-alexa] Nuevo usuario creado:', profile.emails[0].value);
+      const usuario = new Usuario(nuevoUsuario);
+      return done(null, usuario.toJSON());
+
+    } catch (error) {
+      console.error('❌ [google-alexa] Error:', error.message);
+      return done(error, null);
+    }
+  }
+));
+
+console.log('✅ Google OAuth Strategy ALEXA configurado (callback:', OAUTH_ALEXA_CALLBACK, ')');
+
 module.exports = passport;

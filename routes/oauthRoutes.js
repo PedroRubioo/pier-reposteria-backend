@@ -159,18 +159,26 @@ router.get('/google/callback',
     callbackURL: OAUTH_GOOGLE_CALLBACK,
   }),
   async (req, res) => {
+    console.log('🔗 [oauth/google/callback] entered');
+    console.log('   req.session.alexaLinking:', req.session?.alexaLinking);
+    console.log('   req.user:', req.user ? { id: req.user.id, email: req.user.email } : null);
     try {
-      const alexaLinking = req.session.alexaLinking;
+      const alexaLinking = req.session?.alexaLinking;
       if (!alexaLinking) {
-        return res.status(400).send('Sesión expirada. Vuelve a iniciar la vinculación desde la app de Alexa.');
+        console.error('   ❌ Sin alexaLinking en sesión');
+        return res.status(400).type('html').send(
+          '<h2>Sesión expirada</h2><p>Vuelve a iniciar la vinculación desde la app de Alexa.</p>'
+        );
       }
 
       const user = req.user;
       if (!user || !user.id) {
-        return res.status(401).send('Autenticación con Google falló');
+        console.error('   ❌ req.user vacío');
+        return res.status(401).type('html').send('<h2>Autenticación con Google falló</h2>');
       }
 
       const { client_id, redirect_uri, state } = alexaLinking;
+      console.log('   📝 Generando code para usuario', user.id, '→', redirect_uri);
 
       const code = generarCodigo();
       await pool.query(
@@ -181,14 +189,18 @@ router.get('/google/callback',
 
       delete req.session.alexaLinking;
       const finalUrl = construirRedirect(redirect_uri, { code, state });
+      console.log('   ✅ Redirigiendo a:', finalUrl);
 
       req.logout((err) => {
-        if (err) console.error('Logout error tras vincular Alexa:', err);
+        if (err) console.error('   ⚠️ Logout error tras vincular Alexa:', err);
         res.redirect(finalUrl);
       });
     } catch (error) {
-      console.error('Error /api/oauth/google/callback:', error);
-      res.status(500).send('Error interno del servidor');
+      console.error('❌ Error /api/oauth/google/callback:', error.message);
+      console.error('   Stack:', error.stack);
+      res.status(500).type('html').send(
+        `<h2>Error interno</h2><p>${error.message}</p><pre>${error.code || ''} ${error.detail || ''}</pre>`
+      );
     }
   }
 );

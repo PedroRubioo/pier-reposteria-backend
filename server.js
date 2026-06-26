@@ -181,6 +181,7 @@ const uploadRoutes = require('./routes/uploadRoutes');
 const pagosRoutes = require('./routes/pagosRoutes');
 const monitoreoRoutes = require('./routes/monitoreoRoutes');
 const oauthRoutes = require('./routes/oauthRoutes');
+const authVozRoutes = require('./routes/authVozRoutes');
 
 
 
@@ -209,6 +210,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/pagos', pagosRoutes);
 app.use('/api/monitoreo', monitoreoRoutes);
 app.use('/api/oauth', oauthRoutes);
+app.use('/api/auth', authVozRoutes);
 
 
 // ========================================

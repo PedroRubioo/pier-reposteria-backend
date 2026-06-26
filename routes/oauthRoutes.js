@@ -142,7 +142,12 @@ router.get('/google', (req, res, next) => {
   }
 
   req.session.alexaLinking = { client_id, redirect_uri, state: state || null };
-  passport.authenticate('google-alexa', { scope: ['profile', 'email'] })(req, res, next);
+  console.log('🔗 [oauth/google] iniciando OAuth para Account Linking, redirect_uri:', redirect_uri);
+  passport.authenticate('google-alexa', {
+    scope: ['profile', 'email'],
+    prompt: 'select_account',
+    accessType: 'online',
+  })(req, res, next);
 });
 
 // =====================================================================

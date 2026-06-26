@@ -54,8 +54,11 @@ function sanitizeObject(obj) {
  */
 function sanitizeRequestMiddleware(req, res, next) {
   try {
-    // 🔧 EXCEPCIÓN: No sanitizar el callback de Google OAuth
-    if (req.path === '/api/auth/google/callback' || req.path.includes('/api/auth/google')) {
+    // 🔧 EXCEPCIÓN: No sanitizar callbacks/endpoints OAuth.
+    // validator.escape() convierte '/' a '&#x2F;' y rompe los authorization codes de Google.
+    // - /api/auth/google/* → flow web normal con Google
+    // - /api/oauth/*      → flow de Alexa Account Linking (authorize, login, google, token)
+    if (req.path.startsWith('/api/auth/google') || req.path.startsWith('/api/oauth')) {
       return next();
     }
 

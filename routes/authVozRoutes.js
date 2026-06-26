@@ -62,8 +62,8 @@ router.post('/login-empleado', async (req, res) => {
     const ventana = await pool.query(
       `SELECT COUNT(*) AS n FROM core.tbllogin_intentos_voz
        WHERE device_id = $1 AND exito = FALSE
-       AND created_at > NOW() - make_interval(mins => $2)`,
-      [device_id, VENTANA_MIN_DEVICE]
+       AND created_at > NOW() - INTERVAL '15 minutes'`,
+      [device_id]
     );
 
     if (parseInt(ventana.rows[0].n) >= MAX_INTENTOS_DEVICE) {
@@ -120,9 +120,9 @@ router.post('/login-empleado', async (req, res) => {
         await pool.query(
           `UPDATE core.tblusuarios
              SET intentos_pin_fallidos = $1,
-                 pin_bloqueado_hasta = NOW() + make_interval(mins => $2)
-           WHERE id = $3`,
-          [nuevoConteo, BLOQUEO_PIN_MIN, usuario.id]
+                 pin_bloqueado_hasta = NOW() + INTERVAL '15 minutes'
+           WHERE id = $2`,
+          [nuevoConteo, usuario.id]
         );
       } else {
         await pool.query(

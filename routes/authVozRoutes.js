@@ -76,9 +76,10 @@ router.post('/login-empleado', async (req, res) => {
     }
 
     // 2. Buscar usuario por codigo_empleado (solo activos y con rol de empleado)
+    // rol es un ENUM (rol_usuario), por eso casteamos a text para comparar contra array
     const result = await pool.query(
       `SELECT * FROM core.tblusuarios
-       WHERE codigo_empleado = $1 AND activo = TRUE AND rol = ANY($2::text[])`,
+       WHERE codigo_empleado = $1 AND activo = TRUE AND rol::text = ANY($2::text[])`,
       [parseInt(codigo_empleado), ROLES_VOZ]
     );
     const usuario = result.rows[0];

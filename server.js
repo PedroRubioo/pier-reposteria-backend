@@ -25,6 +25,9 @@ const passport = require('./config/passport');
 // Crear app de Express
 const app = express();
 
+// 🔒 Confiar en el proxy de Render (necesario para que secure cookies funcionen tras X-Forwarded-Proto)
+app.set('trust proxy', 1);
+
 // ========================================
 // 🔒 MIDDLEWARES DE SEGURIDAD
 // ========================================
@@ -90,7 +93,9 @@ app.use(session({
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
-    sameSite: 'strict',
+    // 'lax' permite que la cookie viaje en redirects top-level (necesario para OAuth callbacks).
+    // 'strict' las bloquea cuando vienen de un dominio externo como accounts.google.com.
+    sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000 // 24 horas
   }
 }));

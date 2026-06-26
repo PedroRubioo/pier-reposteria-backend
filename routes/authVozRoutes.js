@@ -172,13 +172,7 @@ router.post('/login-empleado', async (req, res) => {
   } catch (error) {
     console.error('Error /api/auth/login-empleado:', error.message);
     console.error('Stack:', error.stack);
-    return res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      debug: error.message,
-      code: error.code,
-      detail: error.detail,
-    });
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
 });
 

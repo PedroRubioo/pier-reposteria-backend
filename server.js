@@ -180,6 +180,7 @@ const sorteosRoutes = require('./routes/sorteosRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const pagosRoutes = require('./routes/pagosRoutes');
 const monitoreoRoutes = require('./routes/monitoreoRoutes');
+const oauthRoutes = require('./routes/oauthRoutes');
 
 
 
@@ -207,6 +208,7 @@ app.use('/api/sorteos', sorteosRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/pagos', pagosRoutes);
 app.use('/api/monitoreo', monitoreoRoutes);
+app.use('/api/oauth', oauthRoutes);
 
 
 // ========================================

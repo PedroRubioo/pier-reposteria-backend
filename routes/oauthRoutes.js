@@ -142,11 +142,9 @@ router.get('/google', (req, res, next) => {
   }
 
   req.session.alexaLinking = { client_id, redirect_uri, state: state || null };
-  console.log('🔗 [oauth/google] iniciando OAuth para Account Linking, redirect_uri:', redirect_uri);
   passport.authenticate('google-alexa', {
     scope: ['profile', 'email'],
     prompt: 'select_account',
-    accessType: 'online',
   })(req, res, next);
 });
 
@@ -156,43 +154,27 @@ router.get('/google', (req, res, next) => {
 // y redirige a Alexa.
 // =====================================================================
 router.get('/google/callback', (req, res, next) => {
-  console.log('🔗 [callback] entered. query:', req.query);
-  console.log('   session.alexaLinking:', req.session?.alexaLinking);
-
   passport.authenticate('google-alexa', async (err, user, info) => {
-    console.log('🔗 [callback] passport result. err:', err?.message, '| user:', user?.id || null, '| info:', info);
-
     if (err) {
-      console.error('❌ [callback] passport ERROR:', err.message);
-      console.error('   name:', err.name, '| code:', err.code, '| oauthError:', err.oauthError);
-      console.error('   stack:', err.stack);
-      const detalle = `
-        <pre>name: ${err.name}
-code: ${err.code}
-message: ${err.message}
-oauthError: ${JSON.stringify(err.oauthError || {})}
-        </pre>
-      `;
-      return res.status(500).type('html').send(`<h2>Error passport</h2>${detalle}`);
+      console.error('Error /api/oauth/google/callback passport:', err.message);
+      return res.status(500).type('html').send(
+        '<h2>Error de autenticación</h2><p>Vuelve a intentar vincular desde la app de Alexa.</p>'
+      );
     }
-
     if (!user) {
-      console.error('❌ [callback] sin user. info:', info);
-      return res.status(401).type('html').send(`<h2>Autenticación fallida</h2><pre>${JSON.stringify(info)}</pre>`);
+      console.error('Sin user en callback. info:', info);
+      return res.status(401).type('html').send('<h2>Autenticación fallida</h2>');
     }
 
     try {
       const alexaLinking = req.session?.alexaLinking;
       if (!alexaLinking) {
-        console.error('   ❌ Sin alexaLinking en sesión');
         return res.status(400).type('html').send(
           '<h2>Sesión expirada</h2><p>Vuelve a iniciar la vinculación desde la app de Alexa.</p>'
         );
       }
 
       const { client_id, redirect_uri, state } = alexaLinking;
-      console.log('   📝 Generando code para usuario', user.id, '→', redirect_uri);
-
       const code = generarCodigo();
       await pool.query(
         `INSERT INTO core.tbloauth_codes (code, usuario_id, client_id, redirect_uri, state, expira_en)
@@ -201,15 +183,10 @@ oauthError: ${JSON.stringify(err.oauthError || {})}
       );
 
       delete req.session.alexaLinking;
-      const finalUrl = construirRedirect(redirect_uri, { code, state });
-      console.log('   ✅ Redirigiendo a:', finalUrl);
-      return res.redirect(finalUrl);
+      return res.redirect(construirRedirect(redirect_uri, { code, state }));
     } catch (error) {
-      console.error('❌ Error inner /api/oauth/google/callback:', error.message);
-      console.error('   Stack:', error.stack);
-      return res.status(500).type('html').send(
-        `<h2>Error interno</h2><p>${error.message}</p>`
-      );
+      console.error('Error /api/oauth/google/callback:', error.message);
+      return res.status(500).type('html').send('<h2>Error interno del servidor</h2>');
     }
   })(req, res, next);
 });

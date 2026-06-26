@@ -212,9 +212,6 @@ passport.use('google-alexa', new GoogleStrategy({
   }
 ));
 
-console.log('✅ Google OAuth Strategy ALEXA configurado');
-console.log('   callbackURL:', OAUTH_ALEXA_CALLBACK);
-console.log('   clientID (primeros 30):', (process.env.GOOGLE_CLIENT_ID || '').substring(0, 30));
-console.log('   clientSecret presente?', !!process.env.GOOGLE_CLIENT_SECRET, '(longitud:', (process.env.GOOGLE_CLIENT_SECRET || '').length, ')');
+console.log('✅ Google OAuth Strategy ALEXA configurado (callback:', OAUTH_ALEXA_CALLBACK, ')');
 
 module.exports = passport;

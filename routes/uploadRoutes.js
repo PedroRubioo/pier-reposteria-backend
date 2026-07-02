@@ -110,7 +110,7 @@ router.post('/imagen', verifyToken, upload.single('imagen'), async (req, res) =>
 // ════════════════════════════════════════════
 // SUBIR MÚLTIPLES IMÁGENES (galería de producto)
 // ════════════════════════════════════════════
-router.post('/imagenes', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), upload.array('imagenes', 6), async (req, res) => {
+router.post('/imagenes', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general', 'repartidor'), upload.array('imagenes', 6), async (req, res) => {
   try {
     if (!cloudinary) {
       return res.status(503).json({ success: false, message: 'Cloudinary no está configurado' });

@@ -30,7 +30,7 @@ function generarCodigo6Digitos() {
 // ── REGISTRO ──
 async function register(req, res) {
   try {
-    const { nombre, apellido, email, password, telefono, rol } = req.body;
+    const { nombre, apellido, email, password, telefono } = req.body;
     const validationErrors = validateRegistrationData(req.body);
     if (validationErrors.length > 0) return res.status(400).json({ success: false, message: 'Errores de validación', errors: validationErrors });
 
@@ -38,10 +38,12 @@ async function register(req, res) {
     if (existente.rows.length > 0) return res.status(400).json({ success: false, message: 'El email ya está registrado' });
 
     const password_hash = await Usuario.hashPassword(password);
+    // El registro público SIEMPRE crea clientes; los roles privilegiados
+    // solo se asignan desde Dirección General (PUT /api/usuarios/:id/rol)
     const resultado = await pool.query(
       `INSERT INTO core.tblusuarios (nombre, apellido, email, password_hash, telefono, rol, activo, email_verificado, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,true,false,NOW(),NOW()) RETURNING id, email`,
-      [nombre, apellido, email.toLowerCase(), password_hash, telefono, rol || 'cliente']
+       VALUES ($1,$2,$3,$4,$5,'cliente',true,false,NOW(),NOW()) RETURNING id, email`,
+      [nombre, apellido, email.toLowerCase(), password_hash, telefono]
     );
     const nuevoUsuario = resultado.rows[0];
 

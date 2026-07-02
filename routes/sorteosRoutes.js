@@ -1,11 +1,11 @@
-// routes/sorteosRoutes.js — Sorteos
+﻿// routes/sorteosRoutes.js â€” Sorteos
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 
-// Listar sorteos (dirección)
-router.get('/', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+// Listar sorteos (direcciÃ³n)
+router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT s.*, u.nombre AS ganador_nombre, u.apellido AS ganador_apellido
@@ -21,7 +21,7 @@ router.get('/', verifyToken, verifyRole('direccion_general'), async (req, res) =
 });
 
 // Crear sorteo
-router.post('/', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.post('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { nombre, premio, min_pedidos } = req.body;
     if (!nombre || !premio) return res.status(400).json({ success: false, message: 'Nombre y premio son requeridos' });
@@ -37,7 +37,7 @@ router.post('/', verifyToken, verifyRole('direccion_general'), async (req, res) 
 });
 
 // Ejecutar sorteo (seleccionar ganador aleatorio)
-router.post('/:id/ejecutar', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.post('/:id/ejecutar', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const sorteo = await pool.query('SELECT * FROM core.tblsorteos WHERE id = $1', [req.params.id]);
     if (sorteo.rows.length === 0) return res.status(404).json({ success: false, message: 'Sorteo no encontrado' });
@@ -55,7 +55,7 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('direccion_general'), async
 
     if (participantes.rows.length === 0) return res.status(400).json({ success: false, message: 'No hay participantes elegibles' });
 
-    // 🔒 SEGURIDAD: idx es generado internamente con Math.random(), no viene del usuario
+    // ðŸ”’ SEGURIDAD: idx es generado internamente con Math.random(), no viene del usuario
     const idx = Math.floor(Math.random() * participantes.rows.length);
     const ganador = participantes.rows[idx]; // eslint-disable-line security/detect-object-injection
 
@@ -68,7 +68,7 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('direccion_general'), async
       success: true,
       ganador: { id: ganador.id, nombre: ganador.nombre, apellido: ganador.apellido, email: ganador.email },
       total_participantes: participantes.rows.length,
-      message: `¡${ganador.nombre} ${ganador.apellido} ganó "${sorteo.rows[0].premio}"!`
+      message: `Â¡${ganador.nombre} ${ganador.apellido} ganÃ³ "${sorteo.rows[0].premio}"!`
     });
   } catch (error) {
     console.error('Error POST /sorteos/:id/ejecutar:', error.message);

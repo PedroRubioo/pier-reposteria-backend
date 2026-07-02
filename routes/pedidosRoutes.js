@@ -117,7 +117,7 @@ router.get('/productos-comprados', verifyToken, async (req, res) => {
       JOIN core.tblpedidos ped ON pi.pedido_id = ped.id
       LEFT JOIN core.tblproductos p ON pi.producto_id = p.id
       LEFT JOIN core.tblcategorias c ON p.categoria_id = c.id
-      WHERE ped.usuario_id = $1 AND ped.estado = 'completado'
+      WHERE ped.usuario_id = $1 AND ped.estado IN ('completado', 'entregado')
       ORDER BY pi.producto_id, ped.created_at DESC
       LIMIT 5
     `, [req.user.userId]);
@@ -133,7 +133,13 @@ router.get('/:id', verifyToken, async (req, res) => {
   try {
     const pedido = await pool.query('SELECT * FROM core.tblpedidos WHERE id = $1', [req.params.id]);
     if (pedido.rows.length === 0) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
-    if (pedido.rows[0].usuario_id !== req.user.userId && !['empleado', 'gerencia', 'direccion_general'].includes(req.user.rol)) {
+    let autorizado = pedido.rows[0].usuario_id === req.user.userId || ['empleado', 'gerencia', 'direccion_general'].includes(req.user.rol);
+    if (!autorizado && req.user.rol === 'repartidor') {
+      // El repartidor solo puede ver pedidos que tiene (o tuvo) asignados
+      const asignacion = await pool.query('SELECT 1 FROM core.tblentregas WHERE pedido_id = $1 AND repartidor_id = $2', [req.params.id, req.user.userId]);
+      autorizado = asignacion.rows.length > 0;
+    }
+    if (!autorizado) {
       return res.status(403).json({ success: false, message: 'Sin permiso' });
     }
     const items = await pool.query('SELECT * FROM core.tblpedido_items WHERE pedido_id = $1', [req.params.id]);
@@ -168,7 +174,9 @@ router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gener
 router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { estado, nota_cancelacion } = req.body;
-    const validos = ['pendiente', 'en_preparacion', 'listo', 'completado', 'cancelado'];
+    // Los estados de entrega (asignado/en_camino/entregado/entrega_fallida) los maneja
+    // normalmente el flujo de /api/entregas; aquí quedan disponibles como corrección manual.
+    const validos = ['pendiente', 'en_preparacion', 'listo', 'completado', 'cancelado', 'asignado', 'en_camino', 'entregado', 'entrega_fallida'];
     if (!validos.includes(estado)) return res.status(400).json({ success: false, message: `Estado inválido. Valores: ${validos.join(', ')}` });
     const updates = [estado];
     let query = 'UPDATE core.tblpedidos SET estado = $1, updated_at = NOW()';
@@ -181,17 +189,21 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
 
     // Crear notificación para el cliente
     const pedido = result.rows[0];
+    const esDomicilio = pedido.tipo_entrega === 'domicilio';
     const mensajes = {
       en_preparacion: { titulo: 'Pedido en preparación', mensaje: `Tu pedido #${pedido.numero} ha comenzado a prepararse.`, tipo: 'pedido' },
-      listo: { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo para recoger en Sucursal Principal.`, tipo: 'pedido' },
+      listo: esDomicilio
+        ? { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo. Pronto saldrá en camino a tu domicilio.`, tipo: 'pedido' }
+        : { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo para recoger en Sucursal Principal.`, tipo: 'pedido' },
       completado: { titulo: 'Pedido completado', mensaje: `Tu pedido #${pedido.numero} ha sido entregado. ¡Gracias por tu compra!`, tipo: 'pedido' },
       cancelado: { titulo: 'Pedido cancelado', mensaje: `Tu pedido #${pedido.numero} ha sido cancelado. ${nota_cancelacion || ''}`.trim(), tipo: 'sistema' },
     };
     const notif = mensajes[estado]; // eslint-disable-line security/detect-object-injection
     if (notif) {
       const { notificarConEmail } = require('../services/notificacionHelper');
-      // Email solo para 'listo' (el cliente necesita saber que ya puede ir por su pedido)
-      if (estado === 'listo') {
+      // Email solo para 'listo' en pickup (el cliente necesita saber que ya puede ir por su pedido);
+      // en domicilio el email importante es "en camino" y lo envía /api/entregas
+      if (estado === 'listo' && !esDomicilio) {
         const userData = await pool.query('SELECT nombre, email FROM core.tblusuarios WHERE id = $1', [pedido.usuario_id]);
         if (userData.rows.length > 0) {
           const u = userData.rows[0];

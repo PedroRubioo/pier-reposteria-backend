@@ -187,6 +187,9 @@ const pagosRoutes = require('./routes/pagosRoutes');
 const monitoreoRoutes = require('./routes/monitoreoRoutes');
 const oauthRoutes = require('./routes/oauthRoutes');
 const authVozRoutes = require('./routes/authVozRoutes');
+const direccionesRoutes = require('./routes/direccionesRoutes');
+const zonasEnvioRoutes = require('./routes/zonasEnvioRoutes');
+const entregasRoutes = require('./routes/entregasRoutes');
 
 
 
@@ -216,6 +219,9 @@ app.use('/api/pagos', pagosRoutes);
 app.use('/api/monitoreo', monitoreoRoutes);
 app.use('/api/oauth', oauthRoutes);
 app.use('/api/auth', authVozRoutes);
+app.use('/api/direcciones', direccionesRoutes);
+app.use('/api/zonas-envio', zonasEnvioRoutes);
+app.use('/api/entregas', entregasRoutes);
 
 
 // ========================================

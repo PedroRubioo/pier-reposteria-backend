@@ -1,11 +1,11 @@
-// routes/simuladorRoutes.js — Simulador de producción con datos reales
+﻿// routes/simuladorRoutes.js â€” Simulador de producciÃ³n con datos reales
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 
-// Productos ordenados por más vendidos (total histórico)
-router.get('/productos-ranking', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+// Productos ordenados por mÃ¡s vendidos (total histÃ³rico)
+router.get('/productos-ranking', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT p.id, p.nombre, p.precio_chico, p.precio_grande, p.imagen_url,
@@ -29,7 +29,7 @@ router.get('/productos-ranking', verifyToken, verifyRole('direccion_general'), a
 
 // Ventas mensuales de un producto
 // Parametros opcionales: meses=N (default 6) o desde/hasta (YYYY-MM-DD) para rango custom
-router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { productoId } = req.params;
     const { desde, hasta } = req.query;
@@ -103,9 +103,9 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       ventasTotal.push({ mes: mesKey, mes_label: mesLabel, unidades: chico.unidades + grande.unidades, ingresos: chico.ingresos + grande.ingresos });
     }
 
-    // ── Modelo: Ley de Crecimiento/Decrecimiento Exponencial ──
-    // dT/dt = KT  →  T(t) = T₀ · e^(Kt)
-    // K = ln(T_f / T₀) / n
+    // â”€â”€ Modelo: Ley de Crecimiento/Decrecimiento Exponencial â”€â”€
+    // dT/dt = KT  â†’  T(t) = Tâ‚€ Â· e^(Kt)
+    // K = ln(T_f / Tâ‚€) / n
 
     // Calcular moda de un array
     const calcModa = (arr) => {
@@ -116,28 +116,28 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       return moda;
     };
 
-    // Predicción exponencial por tamaño — misma fórmula (K = ln(Tf/T0)/n)
+    // PredicciÃ³n exponencial por tamaÃ±o â€” misma fÃ³rmula (K = ln(Tf/T0)/n)
     // Extendida para devolver 3 meses en vez de 1
     const calcPred = (ventas, precio) => {
       const unidades = ventas.map(v => v.unidades);
       const n = unidades.length;
 
-      // Promedio aritmético: x̄ = Σ Tᵢ / n
+      // Promedio aritmÃ©tico: xÌ„ = Î£ Táµ¢ / n
       const promedio = unidades.reduce((a, b) => a + b, 0) / (n || 1);
 
       // Moda
       const moda = calcModa(unidades);
 
-      // T₀ = primer mes con ventas > 0, T_f = último mes
+      // Tâ‚€ = primer mes con ventas > 0, T_f = Ãºltimo mes
       const T0 = unidades.find(u => u > 0) || 1;
       const Tf = unidades[n - 1] || 1;
       const periodos = n - 1 || 1;
 
-      // K = ln(T_f / T₀) / n  (constante de crecimiento/decrecimiento)
+      // K = ln(T_f / Tâ‚€) / n  (constante de crecimiento/decrecimiento)
       const K = (T0 > 0 && Tf > 0) ? Math.log(Tf / T0) / periodos : 0;
 
-      // T(t) = T_f · e^(K·t) → t=1,2,3 para los 3 meses siguientes
-      // Es equivalente a T₀ · e^(K·(n+t)) que es la fórmula del Excel
+      // T(t) = T_f Â· e^(KÂ·t) â†’ t=1,2,3 para los 3 meses siguientes
+      // Es equivalente a Tâ‚€ Â· e^(KÂ·(n+t)) que es la fÃ³rmula del Excel
       const predMeses = [1, 2, 3].map(t => {
         const u = Math.max(0, Math.round(Tf * Math.exp(K * t)));
         return { offset: t, unidades: u, ingresos_estimados: Math.round(u * precio) };
@@ -155,7 +155,7 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
       };
     };
 
-    // Calcular labels para los 3 meses de predicción (siguientes al último histórico)
+    // Calcular labels para los 3 meses de predicciÃ³n (siguientes al Ãºltimo histÃ³rico)
     const ultimoMes = ventasTotal[ventasTotal.length - 1];
     const calcLabelsFuturo = () => {
       if (!ultimoMes) return [];
@@ -214,11 +214,11 @@ router.get('/ventas-mensuales/:productoId', verifyToken, verifyRole('direccion_g
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// ANÁLISIS DE VENTAS (independiente del modelo predictivo)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// ANÃLISIS DE VENTAS (independiente del modelo predictivo)
 // GET /api/simulador/analisis-ventas?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&categoria_id=X
-// ═══════════════════════════════════════════════════════════════════
-router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+router.get('/analisis-ventas', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { desde, hasta, categoria_id, producto_id } = req.query;
 
@@ -226,7 +226,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       return res.status(400).json({ success: false, message: 'Parametros desde y hasta son requeridos' });
     }
 
-    // Rango anterior (misma duración) para comparativo
+    // Rango anterior (misma duraciÃ³n) para comparativo
     const dias = Math.ceil((new Date(hasta) - new Date(desde)) / (1000 * 60 * 60 * 24)) + 1;
     const desdeAnterior = new Date(new Date(desde).getTime() - dias * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const hastaAnterior = new Date(new Date(desde).getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -255,7 +255,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
     const fActual = construirFiltros(desde, hasta);
     const fAnterior = construirFiltros(desdeAnterior, hastaAnterior);
 
-    // 1. KPIs del período actual (siempre basados en items para precision con filtros)
+    // 1. KPIs del perÃ­odo actual (siempre basados en items para precision con filtros)
     const kpis = await pool.query(`
       SELECT
         COUNT(DISTINCT pd.id)::INTEGER AS total_pedidos,
@@ -269,7 +269,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
         ${fActual.whereExtraItem}
     `, fActual.params);
 
-    // 2. KPIs del período anterior (para comparativo)
+    // 2. KPIs del perÃ­odo anterior (para comparativo)
     const kpisAnterior = await pool.query(`
       SELECT
         COUNT(DISTINCT pd.id)::INTEGER AS total_pedidos,
@@ -288,7 +288,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       ? parseFloat(kpis.rows[0].ingresos_totales) / kpis.rows[0].total_pedidos
       : 0;
 
-    // 3. Ventas por día
+    // 3. Ventas por dÃ­a
     const ventasPorDia = await pool.query(`
       SELECT
         pd.created_at::date AS dia,
@@ -305,7 +305,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       ORDER BY dia ASC
     `, fActual.params);
 
-    // 4. Ventas por día de la semana (0=Domingo, 6=Sábado)
+    // 4. Ventas por dÃ­a de la semana (0=Domingo, 6=SÃ¡bado)
     const ventasPorDiaSemana = await pool.query(`
       SELECT
         EXTRACT(DOW FROM pd.created_at)::INTEGER AS dia_num,
@@ -335,7 +335,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       ORDER BY hora
     `, fActual.params);
 
-    // 6. Ventas por categoría (muestra TODAS las categorias del rango si no hay filtro,
+    // 6. Ventas por categorÃ­a (muestra TODAS las categorias del rango si no hay filtro,
     //    o solo la categoria/producto filtrado si hay filtro)
     const ventasPorCategoria = await pool.query(`
       SELECT
@@ -353,7 +353,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       ORDER BY unidades DESC
     `, fActual.params);
 
-    // 7. Top 10 productos del período
+    // 7. Top 10 productos del perÃ­odo
     const topProductos = await pool.query(`
       SELECT
         p.id, p.nombre, p.imagen_url, c.nombre AS categoria,
@@ -371,7 +371,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       LIMIT 10
     `, fActual.params);
 
-    // 8. Distribución por estado de pedido (respeta filtro via EXISTS)
+    // 8. DistribuciÃ³n por estado de pedido (respeta filtro via EXISTS)
     const porEstado = await pool.query(`
       SELECT pd.estado, COUNT(*)::INTEGER AS total
       FROM core.tblpedidos pd
@@ -380,11 +380,11 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       GROUP BY pd.estado
     `, fActual.params);
 
-    // 9. Día con mayor venta
+    // 9. DÃ­a con mayor venta
     const diaTop = ventasPorDia.rows.reduce((max, d) =>
       parseFloat(d.ingresos) > parseFloat(max?.ingresos || 0) ? d : max, null);
 
-    // 10. Productos sin ventas en el período (activos pero con 0 ventas)
+    // 10. Productos sin ventas en el perÃ­odo (activos pero con 0 ventas)
     const sinVentasParams = [desde, hasta];
     let sinVentasExtraWhere = '';
     if (producto_id) {
@@ -412,7 +412,7 @@ router.get('/analisis-ventas', verifyToken, verifyRole('direccion_general'), asy
       LIMIT 20
     `, sinVentasParams);
 
-    // Variaciones vs período anterior
+    // Variaciones vs perÃ­odo anterior
     const varPct = (actual, anterior) => {
       const a = parseFloat(actual) || 0;
       const b = parseFloat(anterior) || 0;

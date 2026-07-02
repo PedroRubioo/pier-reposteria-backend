@@ -45,7 +45,7 @@ router.get('/:id', verifyToken, verifyRole('gerencia', 'direccion_general'), asy
 router.put('/:id/rol', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   try {
     const { rol } = req.body;
-    const validos = ['cliente', 'empleado', 'gerencia', 'direccion_general'];
+    const validos = ['cliente', 'empleado', 'repartidor', 'gerencia', 'direccion_general'];
     if (!validos.includes(rol)) return res.status(400).json({ success: false, message: `Rol inválido. Valores: ${validos.join(', ')}` });
     const result = await pool.query('UPDATE core.tblusuarios SET rol = $1, updated_at = NOW() WHERE id = $2 RETURNING id, nombre, apellido, rol', [rol, req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });

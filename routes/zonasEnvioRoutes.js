@@ -16,7 +16,7 @@ router.get('/cotizar', async (req, res) => {
       WHERE LOWER(zc.colonia) = LOWER($1) AND z.activa = TRUE
     `, [String(colonia).trim()]);
     if (result.rows.length === 0) {
-      return res.json({ success: true, cobertura: false, message: 'Sin cobertura en esa colonia. Puedes recoger en sucursal.' });
+      return res.json({ success: true, cobertura: false, message: 'Sin cobertura en esa colonia o comunidad. Puedes recoger en sucursal.' });
     }
     const zona = result.rows[0];
     res.json({ success: true, cobertura: true, zona_id: zona.zona_id, zona: zona.zona_nombre, tarifa: parseFloat(zona.tarifa) });
@@ -87,7 +87,7 @@ router.post('/', verifyToken, verifyRole('direccion_general'), async (req, res) 
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') {
-      return res.status(400).json({ success: false, message: 'Una de las colonias ya pertenece a otra zona' });
+      return res.status(400).json({ success: false, message: 'Una de las colonias o comunidades ya pertenece a otra zona' });
     }
     console.error('Error POST /zonas-envio:', error.message);
     res.status(500).json({ success: false, message: 'Error al crear zona' });
@@ -125,7 +125,7 @@ router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') {
-      return res.status(400).json({ success: false, message: 'Una de las colonias ya pertenece a otra zona' });
+      return res.status(400).json({ success: false, message: 'Una de las colonias o comunidades ya pertenece a otra zona' });
     }
     console.error('Error PUT /zonas-envio/:id:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar zona' });

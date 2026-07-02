@@ -56,7 +56,7 @@ async function resolverEnvio(db, userId, tipoEntrega, direccionId) {
   );
   if (result.rows.length === 0) return { error: 'Dirección de entrega no encontrada' };
   const d = result.rows[0];
-  if (d.tarifa === null) return { error: `Sin cobertura de envío en la colonia "${d.colonia}". Elige recoger en sucursal.` };
+  if (d.tarifa === null) return { error: `Sin cobertura de envío en "${d.colonia}". Elige recoger en sucursal.` };
   return {
     costo_envio: parseFloat(d.tarifa),
     direccion: {

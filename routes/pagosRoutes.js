@@ -46,7 +46,7 @@ async function resolverEnvio(db, userId, tipoEntrega, direccionId) {
   if (tipoEntrega !== 'domicilio') return { costo_envio: 0, direccion: null };
   if (!direccionId) return { error: 'Selecciona una dirección de entrega' };
   const result = await db.query(
-    `SELECT d.alias, d.calle_numero, d.colonia, d.referencias, d.telefono_contacto,
+    `SELECT d.alias, d.calle_numero, d.colonia, d.referencias, d.telefono_contacto, d.lat, d.lng,
             z.tarifa, z.nombre AS zona
      FROM core.tbldirecciones d
      LEFT JOIN core.tblzonas_colonias zc ON LOWER(zc.colonia) = LOWER(d.colonia)
@@ -66,6 +66,8 @@ async function resolverEnvio(db, userId, tipoEntrega, direccionId) {
       referencias: d.referencias,
       telefono: d.telefono_contacto,
       zona: d.zona,
+      lat: d.lat,
+      lng: d.lng,
     },
   };
 }

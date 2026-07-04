@@ -167,13 +167,16 @@ router.post('/confirmar', verifyToken, async (req, res) => {
     const rand = Math.floor(1000 + Math.random() * 9000);
     const numero = `PIER-${y}${m}${d}-${rand}`;
 
+    // El stock ya se validó y descontó al pagar: un pedido a domicilio nace
+    // "listo" y entra de inmediato al pool que ven los repartidores
+    const estadoInicial = tipoEntrega === 'domicilio' ? 'listo' : 'en_preparacion';
     const pedidoResult = await client.query(
       `INSERT INTO core.tblpedidos
         (numero, usuario_id, total, estado, notas, horario_recogida, metodo_pago,
          tipo_entrega, costo_envio, direccion_entrega, horario_entrega, created_at, updated_at)
-       VALUES ($1,$2,$3,'en_preparacion',$4,$5,'tarjeta',$6,$7,$8,$9,NOW(),NOW()) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,'tarjeta',$7,$8,$9,$10,NOW(),NOW()) RETURNING *`,
       [
-        numero, userId, total, notas || null,
+        numero, userId, total, estadoInicial, notas || null,
         tipoEntrega === 'pickup' ? (horario_recogida || null) : null,
         tipoEntrega, envio.costo_envio,
         envio.direccion ? JSON.stringify(envio.direccion) : null,
@@ -182,17 +185,25 @@ router.post('/confirmar', verifyToken, async (req, res) => {
     );
     const pedido = pedidoResult.rows[0];
 
-    // Crear items del pedido
+    // Crear items del pedido y detectar productos que se quedan sin stock
+    const stockAgotado = [];
+    const stockBajo = [];
     for (const item of items) {
       await client.query(
         `INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal)
          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]
       );
-      await client.query(
-        'UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 AND stock_online > 0',
+      const stockResult = await client.query(
+        'UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 AND stock_online > 0 RETURNING nombre, stock_online',
         [item.cantidad, item.producto_id]
       );
+      // Solo alerta sobre productos que llevan control de stock (el UPDATE no toca los ilimitados)
+      if (stockResult.rows.length > 0) {
+        const s = stockResult.rows[0];
+        if (s.stock_online === 0) stockAgotado.push(s.nombre);
+        else if (s.stock_online <= 5) stockBajo.push(s);
+      }
     }
 
     // Vaciar carrito
@@ -206,6 +217,34 @@ router.post('/confirmar', verifyToken, async (req, res) => {
     );
 
     await client.query('COMMIT');
+
+    // Alertar a los empleados si algún producto quedó agotado o con poco stock
+    if (stockAgotado.length > 0 || stockBajo.length > 0) {
+      try {
+        const { crearNotificacion } = require('../services/notificacionHelper');
+        const empleados = await pool.query(`SELECT id FROM core.tblusuarios WHERE rol = 'empleado' AND activo = TRUE`);
+        for (const emp of empleados.rows) {
+          for (const nombre of stockAgotado) {
+            await crearNotificacion({
+              usuario_id: emp.id,
+              tipo: 'alerta',
+              titulo: 'Producto agotado',
+              mensaje: `"${nombre}" se agotó en la tienda en línea tras el pedido ${numero}. Revisa Gestión de Productos.`,
+            });
+          }
+          for (const s of stockBajo) {
+            await crearNotificacion({
+              usuario_id: emp.id,
+              tipo: 'alerta',
+              titulo: 'Stock bajo',
+              mensaje: `Quedan ${s.stock_online} unidades de "${s.nombre}" en la tienda en línea.`,
+            });
+          }
+        }
+      } catch (stockError) {
+        console.error('Error notificando stock bajo:', stockError.message);
+      }
+    }
 
     // Notificación
     try {

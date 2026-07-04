@@ -31,6 +31,111 @@ router.get('/mis-entregas', verifyToken, verifyRole('repartidor'), async (req, r
   }
 });
 
+// ── Pool de pedidos a domicilio listos y sin repartidor (repartidor) ──
+router.get('/disponibles', verifyToken, verifyRole('repartidor'), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.id AS pedido_id, p.numero, p.total, p.costo_envio, p.notas,
+             p.direccion_entrega, p.horario_entrega, p.updated_at,
+             u.nombre AS cliente_nombre, u.apellido AS cliente_apellido
+      FROM core.tblpedidos p
+      JOIN core.tblusuarios u ON u.id = p.usuario_id
+      WHERE p.tipo_entrega = 'domicilio' AND p.estado = 'listo'
+        AND NOT EXISTS (
+          SELECT 1 FROM core.tblentregas e
+          WHERE e.pedido_id = p.id AND e.estado IN ('asignada', 'en_camino')
+        )
+      ORDER BY p.updated_at
+    `);
+    res.json({ success: true, pedidos: result.rows });
+  } catch (error) {
+    console.error('Error GET /entregas/disponibles:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener pedidos disponibles' });
+  }
+});
+
+// ── Aceptar un pedido del pool (repartidor; el primero que acepta gana) ──
+router.post('/aceptar', verifyToken, verifyRole('repartidor'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { pedido_id } = req.body;
+    if (!pedido_id) return res.status(400).json({ success: false, message: 'pedido_id es requerido' });
+
+    const yo = await client.query('SELECT disponible FROM core.tblusuarios WHERE id = $1', [req.user.userId]);
+    if (!yo.rows[0].disponible) {
+      return res.status(400).json({ success: false, message: 'Activa tu disponibilidad en Perfil para aceptar entregas' });
+    }
+
+    await client.query('BEGIN');
+    const pedidoResult = await client.query('SELECT * FROM core.tblpedidos WHERE id = $1 FOR UPDATE', [pedido_id]);
+    if (pedidoResult.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Pedido no encontrado' }); }
+    const pedido = pedidoResult.rows[0];
+    if (pedido.tipo_entrega !== 'domicilio' || pedido.estado !== 'listo') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: 'Este pedido ya no está disponible' });
+    }
+
+    const entregaResult = await client.query(
+      `INSERT INTO core.tblentregas (pedido_id, repartidor_id, estado, asignado_por, asignado_at, created_at, updated_at)
+       VALUES ($1, $2, 'asignada', $2, NOW(), NOW(), NOW()) RETURNING *`,
+      [pedido_id, req.user.userId]
+    );
+    await client.query(`UPDATE core.tblpedidos SET estado = 'asignado', updated_at = NOW() WHERE id = $1`, [pedido_id]);
+    await client.query('COMMIT');
+
+    res.status(201).json({ success: true, entrega: entregaResult.rows[0], message: `Tomaste el pedido #${pedido.numero}` });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    // El índice único de entrega activa por pedido resuelve la carrera entre repartidores
+    if (error.code === '23505') {
+      return res.status(409).json({ success: false, message: 'Otro repartidor ya tomó este pedido' });
+    }
+    console.error('Error POST /entregas/aceptar:', error.message);
+    res.status(500).json({ success: false, message: 'Error al aceptar el pedido' });
+  } finally { client.release(); }
+});
+
+// ── Avisar demora al cliente cuando no hay repartidores (empleado+) ──
+router.post('/avisar-demora', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const { pedido_id } = req.body;
+    if (!pedido_id) return res.status(400).json({ success: false, message: 'pedido_id es requerido' });
+    const result = await pool.query(
+      `SELECT p.numero, p.usuario_id, p.tipo_entrega, p.estado, u.nombre, u.email
+       FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id WHERE p.id = $1`,
+      [pedido_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+    const p = result.rows[0];
+    if (p.tipo_entrega !== 'domicilio' || p.estado !== 'listo') {
+      return res.status(400).json({ success: false, message: 'Solo aplica a pedidos a domicilio en espera de repartidor' });
+    }
+
+    const safeNumero = he.escape(String(p.numero));
+    await notificarConEmail({
+      usuario_id: p.usuario_id,
+      tipo: 'pedido',
+      titulo: 'Tu pedido tardará un poco más',
+      mensaje: `Tenemos alta demanda de entregas en este momento. Tu pedido #${p.numero} está listo y saldrá en camino en cuanto se libere un repartidor. ¡Gracias por tu paciencia!`,
+      email: p.email,
+      nombre: p.nombre,
+      asunto: `🍰 Tu pedido #${safeNumero} va un poco demorado — Pier Repostería`,
+      contenidoHtml: `
+        <h2>¡Tu pedido está listo, pero va un poco demorado!</h2>
+        <div class="highlight-box">
+          <p><strong>Pedido:</strong> #${safeNumero}</p>
+        </div>
+        <p>Tenemos alta demanda de entregas en este momento. Tu pedido saldrá en camino en cuanto se libere un repartidor.</p>
+        <p>Agradecemos tu paciencia. ¡Vale la pena la espera! 🧁</p>
+      `,
+    });
+    res.json({ success: true, message: `Aviso de demora enviado al cliente del pedido #${p.numero}` });
+  } catch (error) {
+    console.error('Error POST /entregas/avisar-demora:', error.message);
+    res.status(500).json({ success: false, message: 'Error al enviar el aviso' });
+  }
+});
+
 // ── Repartidores con su carga actual (para el combo de asignación) ──
 router.get('/repartidores', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {

@@ -27,7 +27,8 @@ router.post('/', verifyToken, async (req, res) => {
     const items = [];
     for (const item of carrito.rows) {
       if (!item.activo) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}" ya no está disponible` }); }
-      if (item.stock_online > 0 && item.stock_online < item.cantidad) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}": solo quedan ${item.stock_online} unidades` }); }
+      if (item.stock_online === 0) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}" está agotado` }); }
+      if (item.stock_online < item.cantidad) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}": solo quedan ${item.stock_online} unidades` }); }
       const precio = (item.tamano === 'grande' && item.precio_grande) ? parseFloat(item.precio_grande) : parseFloat(item.precio_chico);
       const subtotal = precio * item.cantidad;
       total += subtotal;
@@ -38,7 +39,7 @@ router.post('/', verifyToken, async (req, res) => {
     const pedido = pedidoResult.rows[0];
     for (const item of items) {
       await client.query(`INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal) VALUES ($1,$2,$3,$4,$5,$6,$7)`, [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]);
-      await client.query('UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 AND stock_online > 0', [item.cantidad, item.producto_id]);
+      await client.query('UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2', [item.cantidad, item.producto_id]);
     }
     await client.query('DELETE FROM core.tblcarrito_items WHERE usuario_id = $1', [userId]);
     await client.query(`INSERT INTO core.tblpagos (pedido_id, monto_subtotal, monto_total, estado, created_at) VALUES ($1,$2,$3,'pendiente',NOW())`, [pedido.id, total, total]);

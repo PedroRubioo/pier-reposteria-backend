@@ -71,7 +71,11 @@ router.post('/', verifyToken, async (req, res) => {
     if (producto.rows.length === 0 || !producto.rows[0].activo) {
       return res.status(404).json({ success: false, message: 'Producto no disponible' });
     }
-    if (producto.rows[0].stock_online > 0 && producto.rows[0].stock_online < cantidad) {
+    // stock_online = 0 significa agotado (no existe stock ilimitado)
+    if (producto.rows[0].stock_online === 0) {
+      return res.status(400).json({ success: false, message: `"${producto.rows[0].nombre}" está agotado` });
+    }
+    if (producto.rows[0].stock_online < cantidad) {
       return res.status(400).json({ success: false, message: `Solo quedan ${producto.rows[0].stock_online} unidades` });
     }
 
@@ -83,7 +87,7 @@ router.post('/', verifyToken, async (req, res) => {
 
     if (existe.rows.length > 0) {
       const nueva = existe.rows[0].cantidad + cantidad;
-      if (producto.rows[0].stock_online > 0 && producto.rows[0].stock_online < nueva) {
+      if (producto.rows[0].stock_online < nueva) {
         return res.status(400).json({ success: false, message: `Solo quedan ${producto.rows[0].stock_online} unidades` });
       }
       await pool.query('UPDATE core.tblcarrito_items SET cantidad = $1, updated_at = NOW() WHERE id = $2', [nueva, existe.rows[0].id]);
@@ -112,7 +116,7 @@ router.put('/:itemId', verifyToken, async (req, res) => {
       [req.params.itemId, req.user.userId]
     );
     if (item.rows.length === 0) return res.status(404).json({ success: false, message: 'Item no encontrado' });
-    if (item.rows[0].stock_online > 0 && item.rows[0].stock_online < cantidad) {
+    if (item.rows[0].stock_online < cantidad) {
       return res.status(400).json({ success: false, message: `Solo quedan ${item.rows[0].stock_online} unidades` });
     }
 

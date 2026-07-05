@@ -25,6 +25,9 @@ async function obtenerCarrito(db, userId) {
   const items = [];
   for (const item of carrito.rows) {
     if (!item.activo) return { error: `"${item.nombre}" ya no está disponible` };
+    // stock_online = 0 significa agotado (no existe stock ilimitado)
+    if (item.stock_online === 0) return { error: `"${item.nombre}" está agotado` };
+    if (item.stock_online < item.cantidad) return { error: `"${item.nombre}": solo quedan ${item.stock_online} unidades` };
     let precio = (item.tamano === 'grande' && item.precio_grande)
       ? parseFloat(item.precio_grande)
       : parseFloat(item.precio_chico);
@@ -195,10 +198,9 @@ router.post('/confirmar', verifyToken, async (req, res) => {
         [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]
       );
       const stockResult = await client.query(
-        'UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 AND stock_online > 0 RETURNING nombre, stock_online',
+        'UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 RETURNING nombre, stock_online',
         [item.cantidad, item.producto_id]
       );
-      // Solo alerta sobre productos que llevan control de stock (el UPDATE no toca los ilimitados)
       if (stockResult.rows.length > 0) {
         const s = stockResult.rows[0];
         if (s.stock_online === 0) stockAgotado.push(s.nombre);

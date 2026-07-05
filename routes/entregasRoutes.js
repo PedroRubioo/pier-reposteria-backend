@@ -287,11 +287,13 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
       return res.status(400).json({ success: false, message: `No se puede pasar de "${entrega.estado}" a "${estado}"` });
     }
 
+    // $1::text en todos los usos: sin el cast, Postgres deduce tipos distintos
+    // para el mismo parámetro (varchar en el SET, text en los CASE) y truena con 42P08
     const actualizada = await client.query(`
       UPDATE core.tblentregas
-      SET estado = $1,
-          salio_at = CASE WHEN $1 = 'en_camino' THEN NOW() ELSE salio_at END,
-          finalizado_at = CASE WHEN $1 IN ('entregada', 'fallida') THEN NOW() ELSE finalizado_at END,
+      SET estado = $1::text,
+          salio_at = CASE WHEN $1::text = 'en_camino' THEN NOW() ELSE salio_at END,
+          finalizado_at = CASE WHEN $1::text IN ('entregada', 'fallida') THEN NOW() ELSE finalizado_at END,
           evidencia_url = COALESCE($2, evidencia_url),
           recibio_nombre = COALESCE($3, recibio_nombre),
           motivo_fallo = COALESCE($4, motivo_fallo),

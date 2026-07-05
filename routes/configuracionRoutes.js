@@ -17,19 +17,52 @@ router.get('/', verifyToken, verifyRole('direccion_general'), async (req, res) =
   }
 });
 
-// Obtener toda la configuración de una sección (público)
+// Secciones que puede leer cualquiera (el sitio público las necesita para
+// pintar tema y contenido). Las demás (pagos, seguridad, email...) guardan
+// credenciales y SOLO se leen autenticado vía GET /
+const SECCIONES_PUBLICAS = ['personalizacion', 'contenido', 'general', 'inicio', 'contacto', 'faq', 'nosotros', 'legales', 'promociones'];
+
+// Obtener la configuración de una sección pública
 router.get('/:seccion', async (req, res) => {
   try {
+    if (!SECCIONES_PUBLICAS.includes(req.params.seccion)) {
+      return res.status(403).json({ success: false, message: 'Sección no pública' });
+    }
     const result = await pool.query(
       'SELECT clave, valor FROM core.tblconfiguracion_sistema WHERE seccion = $1',
       [req.params.seccion]
     );
     const config = {};
     result.rows.forEach(r => { config[r.clave] = r.valor; });
-    res.json({ success: true, config });
+    res.json({ success: true, config, configuracion: config });
   } catch (error) {
     console.error('Error GET /configuracion/:seccion:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener configuración' });
+  }
+});
+
+// Actualizar un valor con sección/clave en el body (dirección).
+// Las pantallas de Configuración y Personalización guardan con esta forma.
+router.put('/', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+  try {
+    const { seccion, clave, valor } = req.body;
+    if (!seccion || !clave || valor === undefined) {
+      return res.status(400).json({ success: false, message: 'Sección, clave y valor son requeridos' });
+    }
+    const result = await pool.query(
+      `UPDATE core.tblconfiguracion_sistema SET valor = $1, updated_at = NOW(), updated_by = $2 WHERE seccion = $3 AND clave = $4 RETURNING *`,
+      [JSON.stringify(valor), req.user.userId, seccion, clave]
+    );
+    if (result.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO core.tblconfiguracion_sistema (seccion, clave, valor, updated_by) VALUES ($1, $2, $3, $4)',
+        [seccion, clave, JSON.stringify(valor), req.user.userId]
+      );
+    }
+    res.json({ success: true, message: 'Configuración actualizada' });
+  } catch (error) {
+    console.error('Error PUT /configuracion:', error.message);
+    res.status(500).json({ success: false, message: 'Error al actualizar configuración' });
   }
 });
 

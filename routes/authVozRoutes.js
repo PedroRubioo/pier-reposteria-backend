@@ -13,6 +13,7 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
@@ -308,6 +309,147 @@ router.delete('/revocar-acceso-voz/:usuarioId',
     }
   }
 );
+
+// =====================================================================
+// POST /api/auth/alexa/generar-codigo  (requiere sesión web)
+// Genera un código de 6 dígitos de un solo uso (expira en 5 minutos)
+// para vincular la cuenta del usuario con la skill de Alexa por voz.
+// =====================================================================
+router.post('/alexa/generar-codigo', verifyToken, async (req, res) => {
+  try {
+    const usuarioId = req.user.userId;
+
+    // Invalidar códigos previos sin usar del mismo usuario
+    await pool.query(
+      `UPDATE core.tblcodigos_vinculacion_alexa
+          SET usado = TRUE
+        WHERE usuario_id = $1 AND usado = FALSE`,
+      [usuarioId]
+    );
+
+    // Generar código de 6 dígitos SIN ceros a la izquierda
+    // (Alexa transcribe con AMAZON.NUMBER y perdería el cero inicial)
+    let codigo = null;
+    for (let intento = 0; intento < 5 && !codigo; intento++) {
+      const candidato = String(crypto.randomInt(100000, 1000000));
+      const dup = await pool.query(
+        `SELECT id FROM core.tblcodigos_vinculacion_alexa
+          WHERE codigo = $1 AND usado = FALSE AND expira_en > NOW()`,
+        [candidato]
+      );
+      if (!dup.rows[0]) codigo = candidato;
+    }
+    if (!codigo) {
+      return res.status(500).json({ success: false, message: 'No se pudo generar el código, intenta de nuevo' });
+    }
+
+    await pool.query(
+      `INSERT INTO core.tblcodigos_vinculacion_alexa (codigo, usuario_id, expira_en)
+       VALUES ($1, $2, NOW() + INTERVAL '5 minutes')`,
+      [codigo, usuarioId]
+    );
+
+    return res.json({ success: true, codigo, expira_en_segundos: 300 });
+  } catch (error) {
+    console.error('Error /alexa/generar-codigo:', error);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+});
+
+// =====================================================================
+// POST /api/auth/alexa/canjear-codigo  (público, lo llama la skill)
+// { codigo, device_id } -> JWT (7 días) si el código es vigente.
+// Un solo uso; rate limit por device reutilizando tbllogin_intentos_voz.
+// =====================================================================
+router.post('/alexa/canjear-codigo', async (req, res) => {
+  const { codigo, device_id } = req.body;
+
+  if (!codigo || !device_id) {
+    return res.status(400).json({
+      success: false,
+      codigo: 'invalid_request',
+      message: 'codigo y device_id son requeridos'
+    });
+  }
+
+  try {
+    // Rate limit por device (mismos umbrales que login-empleado)
+    const ventana = await pool.query(
+      `SELECT COUNT(*) AS n FROM core.tbllogin_intentos_voz
+       WHERE device_id = $1 AND exito = FALSE
+       AND created_at > NOW() - INTERVAL '15 minutes'`,
+      [device_id]
+    );
+    if (parseInt(ventana.rows[0].n) >= MAX_INTENTOS_DEVICE) {
+      await registrarIntento(device_id, null, false, 'rate_limit_device');
+      return res.status(429).json({
+        success: false,
+        codigo: 'rate_limit',
+        message: 'Demasiados intentos desde este dispositivo. Intenta en unos minutos.'
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT c.id AS codigo_id, c.usado, c.expira_en,
+              u.id, u.nombre, u.apellido, u.email, u.rol, u.activo
+         FROM core.tblcodigos_vinculacion_alexa c
+         JOIN core.tblusuarios u ON u.id = c.usuario_id
+        WHERE c.codigo = $1
+        ORDER BY c.created_at DESC
+        LIMIT 1`,
+      [String(codigo)]
+    );
+    const fila = result.rows[0];
+
+    const invalido = !fila || fila.usado
+      || new Date(fila.expira_en) < new Date()
+      || !fila.activo;
+
+    if (invalido) {
+      // Respuesta genérica: no revelamos si existe, expiró o ya se usó
+      await registrarIntento(device_id, null, false, 'codigo_vinculacion_invalido');
+      return res.status(401).json({
+        success: false,
+        codigo: 'invalid_code',
+        message: 'Código inválido o expirado'
+      });
+    }
+
+    // Marcar como usado (un solo canje) y registrar qué Alexa lo usó
+    await pool.query(
+      `UPDATE core.tblcodigos_vinculacion_alexa
+          SET usado = TRUE, device_id = $1
+        WHERE id = $2`,
+      [device_id, fila.codigo_id]
+    );
+
+    await registrarIntento(device_id, null, true, null);
+    await pool.query(
+      `UPDATE core.tblusuarios SET ultimo_acceso = NOW() WHERE id = $1`,
+      [fila.id]
+    );
+
+    const token = jwt.sign(
+      { userId: fila.id, email: fila.email, rol: fila.rol, via: 'alexa_codigo' },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.json({
+      success: true,
+      token,
+      user: {
+        id: fila.id,
+        nombre: fila.nombre,
+        apellido: fila.apellido,
+        rol: fila.rol
+      }
+    });
+  } catch (error) {
+    console.error('Error /alexa/canjear-codigo:', error.message);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+});
 
 // =====================================================================
 // GET /api/auth/intentos-voz  (admin)

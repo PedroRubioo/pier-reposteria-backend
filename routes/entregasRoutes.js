@@ -83,6 +83,16 @@ router.post('/aceptar', verifyToken, verifyRole('repartidor'), async (req, res) 
     await client.query(`UPDATE core.tblpedidos SET estado = 'asignado', updated_at = NOW() WHERE id = $1`, [pedido_id]);
     await client.query('COMMIT');
 
+    // Avisar al cliente en el momento de la aceptación (antes solo se
+    // enteraba si estaba mirando la página)
+    const repData = await pool.query('SELECT nombre FROM core.tblusuarios WHERE id = $1', [req.user.userId]);
+    await crearNotificacion({
+      usuario_id: pedido.usuario_id,
+      tipo: 'pedido',
+      titulo: '¡Un repartidor tomó tu pedido!',
+      mensaje: `${repData.rows[0]?.nombre || 'Un repartidor'} tomó tu pedido #${pedido.numero} y saldrá pronto rumbo a tu domicilio.`,
+    });
+
     res.status(201).json({ success: true, entrega: entregaResult.rows[0], message: `Tomaste el pedido #${pedido.numero}` });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -243,6 +253,14 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
       mensaje: `Se te asignó el pedido #${pedido.numero}. Revisa tu panel de entregas.`,
     });
 
+    // El cliente también se entera cuando la asignación es manual
+    await crearNotificacion({
+      usuario_id: pedido.usuario_id,
+      tipo: 'pedido',
+      titulo: '¡Un repartidor tomó tu pedido!',
+      mensaje: `${repartidor.nombre} llevará tu pedido #${pedido.numero} y saldrá pronto rumbo a tu domicilio.`,
+    });
+
     res.status(201).json({
       success: true,
       entrega: entregaResult.rows[0],
@@ -266,7 +284,9 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
 
     const transiciones = {
       en_camino: { desde: ['asignada'], pedido: 'en_camino' },
-      entregada: { desde: ['en_camino'], pedido: 'entregado' },
+      // 'entregada' también desde 'asignada': el repartidor que acepta
+      // estando ya en la zona puede entregar directo sin "salir en camino"
+      entregada: { desde: ['asignada', 'en_camino'], pedido: 'entregado' },
       fallida: { desde: ['asignada', 'en_camino'], pedido: 'entrega_fallida' },
     };
     const transicion = transiciones[estado]; // eslint-disable-line security/detect-object-injection
@@ -292,7 +312,9 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
     const actualizada = await client.query(`
       UPDATE core.tblentregas
       SET estado = $1::text,
-          salio_at = CASE WHEN $1::text = 'en_camino' THEN NOW() ELSE salio_at END,
+          salio_at = CASE WHEN $1::text = 'en_camino' THEN NOW()
+                          WHEN $1::text = 'entregada' THEN COALESCE(salio_at, NOW())
+                          ELSE salio_at END,
           finalizado_at = CASE WHEN $1::text IN ('entregada', 'fallida') THEN NOW() ELSE finalizado_at END,
           evidencia_url = COALESCE($2, evidencia_url),
           recibio_nombre = COALESCE($3, recibio_nombre),
@@ -332,11 +354,28 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
         });
       }
     } else if (estado === 'entregada') {
-      await crearNotificacion({
+      // Confirmación de entrega con email: le sirve al cliente de comprobante
+      const userData = await pool.query('SELECT nombre, email FROM core.tblusuarios WHERE id = $1', [pedido.usuario_id]);
+      const u = userData.rows[0];
+      const safeNumero = he.escape(String(pedido.numero));
+      const safeRecibio = he.escape(String(recibio_nombre || ''));
+      await notificarConEmail({
         usuario_id: pedido.usuario_id,
         tipo: 'pedido',
         titulo: 'Pedido entregado',
-        mensaje: `Tu pedido #${pedido.numero} fue entregado. ¡Gracias por tu compra!`,
+        mensaje: `Tu pedido #${pedido.numero} fue entregado${recibio_nombre ? ` (lo recibió ${recibio_nombre})` : ''}. ¡Gracias por tu compra!`,
+        email: u?.email,
+        nombre: u?.nombre,
+        asunto: `✅ Pedido #${safeNumero} entregado — Pier Repostería`,
+        contenidoHtml: `
+          <h2>¡Tu pedido fue entregado!</h2>
+          <div class="highlight-box">
+            <p><strong>Pedido:</strong> #${safeNumero}</p>
+            ${safeRecibio ? `<p><strong>Lo recibió:</strong> ${safeRecibio}</p>` : ''}
+          </div>
+          <p>Gracias por tu compra. ¡Buen provecho! 🧁</p>
+          <p>¿Nos cuentas cómo estuvo? Deja tu reseña en la web.</p>
+        `,
       });
     } else {
       await crearNotificacion({
@@ -353,6 +392,47 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
     console.error('Error PUT /entregas/:id/estado:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar entrega' });
   } finally { client.release(); }
+});
+
+// ── "Llegué al domicilio" (repartidor): avisa al cliente SIN cambiar
+// el estado — notificación + email de "sal a recibir tu pedido" ──
+router.post('/:id/llegue', verifyToken, verifyRole('repartidor'), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT e.estado, p.numero, p.usuario_id, u.nombre, u.email
+      FROM core.tblentregas e
+      JOIN core.tblpedidos p ON p.id = e.pedido_id
+      JOIN core.tblusuarios u ON u.id = p.usuario_id
+      WHERE e.id = $1 AND e.repartidor_id = $2
+    `, [req.params.id, req.user.userId]);
+    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Entrega no encontrada' });
+    const e = result.rows[0];
+    if (e.estado !== 'en_camino') {
+      return res.status(400).json({ success: false, message: 'Solo puedes avisar llegada cuando vas en camino' });
+    }
+
+    const safeNumero = he.escape(String(e.numero));
+    await notificarConEmail({
+      usuario_id: e.usuario_id,
+      tipo: 'pedido',
+      titulo: '¡Tu repartidor llegó!',
+      mensaje: `Tu repartidor está afuera de tu domicilio con el pedido #${e.numero}. ¡Sal a recibirlo!`,
+      email: e.email,
+      nombre: e.nombre,
+      asunto: `🛵 ¡Tu repartidor llegó! Pedido #${safeNumero} — Pier Repostería`,
+      contenidoHtml: `
+        <h2>¡Tu repartidor está en tu domicilio!</h2>
+        <div class="highlight-box">
+          <p><strong>Pedido:</strong> #${safeNumero}</p>
+        </div>
+        <p>Sal a recibir tu pedido. Ten a la mano tu número de pedido. 🧁</p>
+      `,
+    });
+    res.json({ success: true, message: 'Cliente avisado de tu llegada' });
+  } catch (error) {
+    console.error('Error POST /entregas/:id/llegue:', error.message);
+    res.status(500).json({ success: false, message: 'Error al avisar llegada' });
+  }
 });
 
 module.exports = router;

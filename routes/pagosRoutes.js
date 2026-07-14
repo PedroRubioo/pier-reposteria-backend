@@ -6,10 +6,25 @@ const { verifyToken } = require('../middleware/auth');
 
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+// ¿La recogida es para OTRO día? (fecha en huso de Huejutla, UTC-6).
+// Un pedido para fecha futura puede aceptar productos sin stock HOY:
+// queda "por confirmar" y el personal decide si podrá producirse.
+function esRecogidaFutura(horarioIso) {
+  if (!horarioIso) return false;
+  const recogida = new Date(horarioIso);
+  if (isNaN(recogida.getTime())) return false;
+  const diaMx = (d) => {
+    const t = new Date(d.getTime() - 6 * 60 * 60 * 1000);
+    return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+  };
+  return diaMx(recogida) > diaMx(new Date());
+}
+
 // Carrito con promociones activas aplicadas. El mismo cálculo se usa al
 // crear el intent y al confirmar, para que el monto cobrado y el pedido
-// guardado nunca difieran.
-async function obtenerCarrito(db, userId) {
+// guardado nunca difieran. Con permitirFuturo, los productos sin stock
+// no rechazan la compra: se reportan en "faltantes" (pedido por confirmar).
+async function obtenerCarrito(db, userId, permitirFuturo = false) {
   const carrito = await db.query(
     `SELECT ci.*, p.nombre, p.precio_chico, p.precio_grande, p.stock_online, p.activo,
       pr.descuento_porcentaje AS promo_descuento
@@ -23,11 +38,16 @@ async function obtenerCarrito(db, userId) {
 
   let subtotal = 0;
   const items = [];
+  const faltantes = [];
   for (const item of carrito.rows) {
     if (!item.activo) return { error: `"${item.nombre}" ya no está disponible` };
     // stock_online = 0 significa agotado (no existe stock ilimitado)
-    if (item.stock_online === 0) return { error: `"${item.nombre}" está agotado` };
-    if (item.stock_online < item.cantidad) return { error: `"${item.nombre}": solo quedan ${item.stock_online} unidades` };
+    const sinStock = item.stock_online === 0 || item.stock_online < item.cantidad;
+    if (sinStock && !permitirFuturo) {
+      if (item.stock_online === 0) return { error: `"${item.nombre}" está agotado` };
+      return { error: `"${item.nombre}": solo quedan ${item.stock_online} unidades` };
+    }
+    if (sinStock) faltantes.push(item.nombre);
     let precio = (item.tamano === 'grande' && item.precio_grande)
       ? parseFloat(item.precio_grande)
       : parseFloat(item.precio_chico);
@@ -39,9 +59,10 @@ async function obtenerCarrito(db, userId) {
       producto_id: item.producto_id, nombre: item.nombre,
       cantidad: item.cantidad, tamano: item.tamano,
       precio_unitario: precio, subtotal: importe,
+      sin_stock: sinStock,
     });
   }
-  return { items, subtotal };
+  return { items, subtotal, faltantes };
 }
 
 // Resuelve el costo de envío y el snapshot de dirección según la modalidad.
@@ -82,7 +103,11 @@ router.post('/crear-intent', verifyToken, async (req, res) => {
     const tipoEntrega = req.body.tipo_entrega === 'domicilio' ? 'domicilio' : 'pickup';
     const direccionId = req.body.direccion_id ? parseInt(req.body.direccion_id) : null;
 
-    const carrito = await obtenerCarrito(pool, userId);
+    // Pickup para OTRO día: se permite pagar productos sin stock hoy
+    // (el pedido quedará "por confirmar" por el personal)
+    const permitirFuturo = tipoEntrega === 'pickup' && esRecogidaFutura(req.body.horario_recogida);
+
+    const carrito = await obtenerCarrito(pool, userId, permitirFuturo);
     if (carrito.error) return res.status(400).json({ success: false, message: carrito.error });
 
     const envio = await resolverEnvio(pool, userId, tipoEntrega, direccionId);
@@ -109,6 +134,8 @@ router.post('/crear-intent', verifyToken, async (req, res) => {
       subtotal: carrito.subtotal,
       costo_envio: envio.costo_envio,
       total,
+      por_confirmar: (carrito.faltantes || []).length > 0,
+      productos_por_confirmar: carrito.faltantes || [],
     });
   } catch (error) {
     console.error('Error creando payment intent:', error.message);
@@ -142,12 +169,15 @@ router.post('/confirmar', verifyToken, async (req, res) => {
 
     await client.query('BEGIN');
 
-    const carrito = await obtenerCarrito(client, userId);
+    const permitirFuturo = tipoEntrega === 'pickup' && esRecogidaFutura(horario_recogida);
+    const carrito = await obtenerCarrito(client, userId, permitirFuturo);
     if (carrito.error) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, message: carrito.error });
     }
     const { items, subtotal } = carrito;
+    const faltantes = carrito.faltantes || [];
+    const porConfirmar = faltantes.length > 0;
 
     const envio = await resolverEnvio(client, userId, tipoEntrega, direccionId);
     if (envio.error) {
@@ -170,20 +200,24 @@ router.post('/confirmar', verifyToken, async (req, res) => {
     const rand = Math.floor(1000 + Math.random() * 9000);
     const numero = `PIER-${y}${m}${d}-${rand}`;
 
-    // El stock ya se validó y descontó al pagar: un pedido a domicilio nace
-    // "listo" y entra de inmediato al pool que ven los repartidores
-    const estadoInicial = tipoEntrega === 'domicilio' ? 'listo' : 'en_preparacion';
+    // Los productos ya están hechos (repostería lista): el pedido pagado
+    // nace "listo" — pickup y domicilio por igual (los de domicilio entran
+    // al pool de repartidores). La excepción: un pedido programado con
+    // productos sin stock hoy nace "pendiente" y por_confirmar, para que
+    // el personal apruebe si podrá tenerse en esa fecha.
+    const estadoInicial = porConfirmar ? 'pendiente' : 'listo';
     const pedidoResult = await client.query(
       `INSERT INTO core.tblpedidos
         (numero, usuario_id, total, estado, notas, horario_recogida, metodo_pago,
-         tipo_entrega, costo_envio, direccion_entrega, horario_entrega, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,'tarjeta',$7,$8,$9,$10,NOW(),NOW()) RETURNING *`,
+         tipo_entrega, costo_envio, direccion_entrega, horario_entrega, por_confirmar, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'tarjeta',$7,$8,$9,$10,$11,NOW(),NOW()) RETURNING *`,
       [
         numero, userId, total, estadoInicial, notas || null,
         tipoEntrega === 'pickup' ? (horario_recogida || null) : null,
         tipoEntrega, envio.costo_envio,
         envio.direccion ? JSON.stringify(envio.direccion) : null,
         tipoEntrega === 'domicilio' ? (horario_entrega || null) : null,
+        porConfirmar,
       ]
     );
     const pedido = pedidoResult.rows[0];
@@ -197,6 +231,9 @@ router.post('/confirmar', verifyToken, async (req, res) => {
          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]
       );
+      // Los productos sin stock de un pedido por confirmar NO descuentan
+      // inventario: se producirán para la fecha si el personal lo aprueba
+      if (item.sin_stock) continue;
       const stockResult = await client.query(
         'UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 RETURNING nombre, stock_online',
         [item.cantidad, item.producto_id]
@@ -219,6 +256,27 @@ router.post('/confirmar', verifyToken, async (req, res) => {
     );
 
     await client.query('COMMIT');
+
+    // Pedido programado con faltantes: el personal debe aprobarlo o rechazarlo
+    if (porConfirmar) {
+      try {
+        const { crearNotificacion } = require('../services/notificacionHelper');
+        const fechaTxt = horario_recogida
+          ? new Date(horario_recogida).toLocaleDateString('es-MX', { timeZone: 'America/Mexico_City', weekday: 'long', day: 'numeric', month: 'long' })
+          : 'la fecha programada';
+        const staff = await pool.query(`SELECT id FROM core.tblusuarios WHERE rol::text = ANY($1::text[]) AND activo = TRUE`, [['empleado', 'gerencia', 'direccion_general']]);
+        for (const s of staff.rows) {
+          await crearNotificacion({
+            usuario_id: s.id,
+            tipo: 'alerta',
+            titulo: 'Pedido por confirmar',
+            mensaje: `El pedido ${numero} (recogida ${fechaTxt}) incluye productos sin stock hoy: ${faltantes.join(', ')}. Apruébalo o recházalo en Gestión de Pedidos.`,
+          });
+        }
+      } catch (notifError) {
+        console.error('Error notificando pedido por confirmar:', notifError.message);
+      }
+    }
 
     // Alertar a los empleados si algún producto quedó agotado o con poco stock
     if (stockAgotado.length > 0 || stockBajo.length > 0) {
@@ -264,9 +322,11 @@ router.post('/confirmar', verifyToken, async (req, res) => {
           usuario_id: userId,
           tipo: 'pedido',
           titulo: '¡Pedido recibido!',
-          mensaje: esDomicilio
-            ? `Tu pedido #${numero} por $${total.toFixed(2)} fue confirmado. Te avisaremos cuando salga en camino a tu domicilio.`
-            : `Tu pedido #${numero} por $${total.toFixed(2)} fue confirmado. Te avisaremos cuando esté listo para recoger.`,
+          mensaje: porConfirmar
+            ? `Recibimos tu pedido #${numero} por $${total.toFixed(2)}. Como es para otra fecha, estamos confirmando la disponibilidad de tus productos: te avisamos muy pronto.`
+            : esDomicilio
+              ? `Tu pedido #${numero} por $${total.toFixed(2)} fue confirmado. Te avisaremos cuando salga en camino a tu domicilio.`
+              : `Tu pedido #${numero} por $${total.toFixed(2)} fue confirmado. Te avisaremos cuando esté listo para recoger.`,
           email: u.email,
           nombre: u.nombre,
           asunto: `🍰 Pedido #${safeNumero} confirmado — Pier Repostería`,
@@ -278,9 +338,11 @@ router.post('/confirmar', verifyToken, async (req, res) => {
               ${esDomicilio ? `<p><strong>Envío a domicilio:</strong> $${safeEnvio} MXN</p>` : ''}
               <p><strong>Total:</strong> $${safeTotal} MXN</p>
             </div>
-            ${esDomicilio
-              ? '<p>Te notificaremos cuando tu pedido salga en camino a tu domicilio.</p>'
-              : '<p>Te notificaremos cuando esté listo para recoger en Sucursal Principal, Huejutla de Reyes.</p>'}
+            ${porConfirmar
+              ? '<p>Tu pedido es para otra fecha: estamos confirmando la disponibilidad de tus productos y te avisaremos muy pronto. Si no pudiéramos prepararlo, tu pago se reembolsa completo.</p>'
+              : esDomicilio
+                ? '<p>Te notificaremos cuando tu pedido salga en camino a tu domicilio.</p>'
+                : '<p>Te notificaremos cuando esté listo para recoger en Sucursal Principal, Huejutla de Reyes.</p>'}
           `
         });
       }

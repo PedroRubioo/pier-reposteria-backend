@@ -247,4 +247,118 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
   }
 });
 
+// ── Aprobar un pedido programado "por confirmar" (empleado+) ──
+// Confirma que los productos podrán tenerse para la fecha de recogida.
+router.put('/:id/aprobar', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.*, u.nombre AS cliente_nombre, u.email AS cliente_email
+       FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id
+       WHERE p.id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+    const p = result.rows[0];
+    if (!p.por_confirmar) return res.status(400).json({ success: false, message: 'Este pedido no está por confirmar' });
+
+    await pool.query(
+      'UPDATE core.tblpedidos SET por_confirmar = FALSE, updated_at = NOW() WHERE id = $1',
+      [req.params.id]
+    );
+
+    const fechaTxt = p.horario_recogida
+      ? new Date(p.horario_recogida).toLocaleDateString('es-MX', { timeZone: 'America/Mexico_City', weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+      : 'la fecha programada';
+    const { notificarConEmail } = require('../services/notificacionHelper');
+    const safeNumero = he.escape(String(p.numero));
+    await notificarConEmail({
+      usuario_id: p.usuario_id,
+      tipo: 'pedido',
+      titulo: '¡Pedido confirmado!',
+      mensaje: `¡Buenas noticias! Tu pedido #${p.numero} quedó confirmado para ${fechaTxt}. Te avisamos cuando esté listo para recoger.`,
+      email: p.cliente_email,
+      nombre: p.cliente_nombre,
+      asunto: `🍰 ¡Pedido #${safeNumero} confirmado! — Pier Repostería`,
+      contenidoHtml: `
+        <h2>¡Tu pedido quedó confirmado!</h2>
+        <div class="highlight-box">
+          <p><strong>Pedido:</strong> #${safeNumero}</p>
+          <p><strong>Recogida:</strong> ${he.escape(fechaTxt)}</p>
+        </div>
+        <p>Tus productos estarán listos para esa fecha. ¡Gracias por tu preferencia! 🧁</p>
+      `,
+    });
+
+    res.json({ success: true, message: `Pedido ${p.numero} aprobado; el cliente ya fue notificado` });
+  } catch (error) {
+    console.error('Error PUT /pedidos/:id/aprobar:', error.message);
+    res.status(500).json({ success: false, message: 'Error al aprobar el pedido' });
+  }
+});
+
+// ── Rechazar un pedido programado "por confirmar" (empleado+) ──
+// Cancela el pedido y genera automáticamente la solicitud de reembolso.
+router.put('/:id/rechazar', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { motivo } = req.body;
+    if (!motivo || String(motivo).trim().length < 5) {
+      return res.status(400).json({ success: false, message: 'Escribe un motivo de rechazo (mín. 5 caracteres)' });
+    }
+
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT p.*, u.nombre AS cliente_nombre, u.email AS cliente_email
+       FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id
+       WHERE p.id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Pedido no encontrado' }); }
+    const p = result.rows[0];
+    if (!p.por_confirmar) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: 'Este pedido no está por confirmar' }); }
+
+    await client.query(
+      `UPDATE core.tblpedidos SET estado = 'cancelado', por_confirmar = FALSE, nota_cancelacion = $1, updated_at = NOW() WHERE id = $2`,
+      [String(motivo).trim(), req.params.id]
+    );
+
+    // Solicitud de reembolso automática: aparece en Gestión de Reembolsos
+    // para procesarse con el flujo normal (el cliente ya pagó en línea)
+    await client.query(
+      `INSERT INTO core.tblreembolsos (pedido_id, producto_id, usuario_id, monto, motivo, descripcion, fotos_evidencia, estado, created_at, updated_at)
+       VALUES ($1, NULL, $2, $3, 'otro', $4, NULL, 'pendiente', NOW(), NOW())`,
+      [p.id, p.usuario_id, p.total, `Pedido programado rechazado por disponibilidad: ${String(motivo).trim()}`]
+    );
+    await client.query('COMMIT');
+
+    const { notificarConEmail } = require('../services/notificacionHelper');
+    const safeNumero = he.escape(String(p.numero));
+    const totalTxt = parseFloat(p.total).toFixed(2);
+    await notificarConEmail({
+      usuario_id: p.usuario_id,
+      tipo: 'alerta',
+      titulo: 'No podremos preparar tu pedido',
+      mensaje: `Lo sentimos: tu pedido #${p.numero} no podrá prepararse para esa fecha (${String(motivo).trim()}). Tu pago de $${totalTxt} será reembolsado; ya generamos la solicitud.`,
+      email: p.cliente_email,
+      nombre: p.cliente_nombre,
+      asunto: `Pedido #${safeNumero}: no disponible para tu fecha — Pier Repostería`,
+      contenidoHtml: `
+        <h2>Lo sentimos mucho</h2>
+        <div class="highlight-box">
+          <p><strong>Pedido:</strong> #${safeNumero}</p>
+          <p><strong>Motivo:</strong> ${he.escape(String(motivo).trim())}</p>
+        </div>
+        <p>No podremos preparar tu pedido para la fecha solicitada. Tu pago de <strong>$${he.escape(totalTxt)} MXN</strong> será reembolsado completo: ya generamos la solicitud y te avisaremos cuando se procese.</p>
+        <p>Gracias por tu comprensión. ¡Esperamos consentirte pronto! 🧁</p>
+      `,
+    });
+
+    res.json({ success: true, message: `Pedido ${p.numero} rechazado; se generó la solicitud de reembolso y el cliente fue notificado` });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error PUT /pedidos/:id/rechazar:', error.message);
+    res.status(500).json({ success: false, message: 'Error al rechazar el pedido' });
+  } finally { client.release(); }
+});
+
 module.exports = router;

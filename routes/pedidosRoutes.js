@@ -35,7 +35,10 @@ router.post('/', verifyToken, async (req, res) => {
       items.push({ producto_id: item.producto_id, nombre: item.nombre, cantidad: item.cantidad, tamano: item.tamano, precio_unitario: precio, subtotal });
     }
     const numero = generarNumeroPedido();
-    const pedidoResult = await client.query(`INSERT INTO core.tblpedidos (numero, usuario_id, total, estado, notas, horario_recogida, metodo_pago, created_at, updated_at) VALUES ($1,$2,$3,'pendiente',$4,$5,$6,NOW(),NOW()) RETURNING *`, [numero, userId, total, notas || null, horario_recogida || null, metodo_pago || null]);
+    // El stock se validó y descontó aquí mismo: el producto ya está hecho
+    // y apartado, así que el pedido nace "listo" (solo falta pagar al
+    // recogerlo). "pendiente" queda exclusivo de los programados por confirmar.
+    const pedidoResult = await client.query(`INSERT INTO core.tblpedidos (numero, usuario_id, total, estado, notas, horario_recogida, metodo_pago, created_at, updated_at) VALUES ($1,$2,$3,'listo',$4,$5,$6,NOW(),NOW()) RETURNING *`, [numero, userId, total, notas || null, horario_recogida || null, metodo_pago || null]);
     const pedido = pedidoResult.rows[0];
     for (const item of items) {
       await client.query(`INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal) VALUES ($1,$2,$3,$4,$5,$6,$7)`, [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]);
@@ -61,7 +64,7 @@ router.post('/', verifyToken, async (req, res) => {
         usuario_id: userId,
         tipo: 'pedido',
         titulo: '¡Pedido recibido!',
-        mensaje: `Tu pedido #${numero} por $${total.toFixed(2)} ha sido recibido. Te avisaremos cuando esté en preparación.`,
+        mensaje: `Tu pedido #${numero} por $${total.toFixed(2)} está listo. Pasa a recogerlo cuando gustes y paga en tienda.`,
         email: u.email,
         nombre: u.nombre,
         asunto: `🍰 Pedido #${safeNumero} recibido — Pier Repostería`,
@@ -73,7 +76,7 @@ router.post('/', verifyToken, async (req, res) => {
             <p><strong>Productos:</strong> ${safeItemsTexto}</p>
             ${safeHorario ? `<p><strong>Horario de recogida:</strong> ${safeHorario}</p>` : ''}
           </div>
-          <p>Te notificaremos cuando tu pedido esté en preparación y cuando esté listo para recoger.</p>
+          <p>Tu pedido ya está listo: pasa a recogerlo a Sucursal Principal, Huejutla de Reyes, y paga ahí mismo. 🧁</p>
           <p><strong>Recuerda:</strong> recoge tu pedido en Sucursal Principal, Huejutla de Reyes.</p>
         `
       });

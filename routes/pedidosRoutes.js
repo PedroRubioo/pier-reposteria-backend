@@ -132,6 +132,21 @@ router.get('/productos-comprados', verifyToken, async (req, res) => {
   }
 });
 
+// ── Conteo de pedidos por estado (empleado+) ──
+// La lista GET / está limitada (limite=100), así que contar sobre ella
+// da números incompletos; este conteo es sobre TODOS los pedidos.
+router.get('/conteo-estados', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT estado, COUNT(*)::int AS total FROM core.tblpedidos GROUP BY estado'
+    );
+    res.json({ success: true, conteos: result.rows });
+  } catch (error) {
+    console.error('Error GET /pedidos/conteo-estados:', error.message);
+    res.status(500).json({ success: false, message: 'Error al contar pedidos' });
+  }
+});
+
 // ── Detalle de pedido (DEBE ir DESPUÉS de las rutas específicas) ──
 router.get('/:id', verifyToken, async (req, res) => {
   try {

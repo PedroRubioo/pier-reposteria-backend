@@ -44,16 +44,26 @@ router.put('/leer-todas', verifyToken, async (req, res) => {
 // Enviar notificación masiva (empleado+)
 router.post('/enviar', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
-    const { tipo, titulo, mensaje, audiencia, usuario_ids } = req.body;
+    const { tipo, titulo, mensaje, audiencia, usuario_ids, destinatario_email } = req.body;
     if (!tipo || !titulo || !mensaje || !audiencia) return res.status(400).json({ success: false, message: 'Tipo, título, mensaje y audiencia son requeridos' });
 
     let destinatarios = [];
     if (audiencia === 'todos') {
-      const users = await pool.query('SELECT id FROM core.tblusuarios WHERE activo = true');
+      // "Todos" significa todos los CLIENTES: el personal no recibe promociones
+      const users = await pool.query("SELECT id FROM core.tblusuarios WHERE activo = true AND rol = 'cliente'");
       destinatarios = users.rows.map(u => u.id);
+    } else if (audiencia === 'individual' && destinatario_email) {
+      // El formulario web manda el email del cliente, no su id
+      const user = await pool.query(
+        "SELECT id FROM core.tblusuarios WHERE activo = true AND rol = 'cliente' AND LOWER(email) = LOWER($1)",
+        [String(destinatario_email).trim()]
+      );
+      if (user.rows.length === 0) return res.status(404).json({ success: false, message: 'No existe un cliente activo con ese email' });
+      destinatarios = [user.rows[0].id];
     } else if (audiencia === 'individual' && usuario_ids) {
       destinatarios = Array.isArray(usuario_ids) ? usuario_ids : [usuario_ids];
     }
+    if (destinatarios.length === 0) return res.status(400).json({ success: false, message: 'No hay destinatarios para esta notificación' });
 
     // Insertar notificación para cada destinatario
     for (const uid of destinatarios) {

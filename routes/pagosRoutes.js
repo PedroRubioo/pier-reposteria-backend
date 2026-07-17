@@ -222,27 +222,38 @@ router.post('/confirmar', verifyToken, async (req, res) => {
     );
     const pedido = pedidoResult.rows[0];
 
-    // Crear items del pedido y detectar productos que se quedan sin stock
+    // Descontar stock y crear items registrando cuánto se descontó de
+    // verdad por línea (stock_descontado): es lo que se repone si el
+    // pedido se cancela o se rechaza
     const stockAgotado = [];
     const stockBajo = [];
     for (const item of items) {
-      await client.query(
-        `INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]
-      );
       // Los productos sin stock de un pedido por confirmar NO descuentan
       // inventario: se producirán para la fecha si el personal lo aprueba
-      if (item.sin_stock) continue;
-      const stockResult = await client.query(
-        'UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2 RETURNING nombre, stock_online',
-        [item.cantidad, item.producto_id]
-      );
-      if (stockResult.rows.length > 0) {
-        const s = stockResult.rows[0];
-        if (s.stock_online === 0) stockAgotado.push(s.nombre);
-        else if (s.stock_online <= 5) stockBajo.push(s);
+      let stockDescontado = 0;
+      if (!item.sin_stock) {
+        // El sub-select con FOR UPDATE bloquea la fila y expone el valor
+        // previo: el descuento real puede ser parcial por el tope en cero
+        const stockResult = await client.query(
+          `UPDATE core.tblproductos p
+           SET stock_online = GREATEST(p.stock_online - $1, 0), updated_at = NOW()
+           FROM (SELECT id, stock_online AS stock_anterior FROM core.tblproductos WHERE id = $2 FOR UPDATE) prev
+           WHERE p.id = prev.id
+           RETURNING p.nombre, p.stock_online, prev.stock_anterior`,
+          [item.cantidad, item.producto_id]
+        );
+        if (stockResult.rows.length > 0) {
+          const s = stockResult.rows[0];
+          stockDescontado = s.stock_anterior - s.stock_online;
+          if (s.stock_online === 0) stockAgotado.push(s.nombre);
+          else if (s.stock_online <= 5) stockBajo.push(s);
+        }
       }
+      await client.query(
+        `INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal, stock_descontado)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal, stockDescontado]
+      );
     }
 
     // Vaciar carrito

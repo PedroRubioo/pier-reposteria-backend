@@ -41,8 +41,19 @@ router.post('/', verifyToken, async (req, res) => {
     const pedidoResult = await client.query(`INSERT INTO core.tblpedidos (numero, usuario_id, total, estado, notas, horario_recogida, metodo_pago, created_at, updated_at) VALUES ($1,$2,$3,'listo',$4,$5,$6,NOW(),NOW()) RETURNING *`, [numero, userId, total, notas || null, horario_recogida || null, metodo_pago || null]);
     const pedido = pedidoResult.rows[0];
     for (const item of items) {
-      await client.query(`INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal) VALUES ($1,$2,$3,$4,$5,$6,$7)`, [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal]);
-      await client.query('UPDATE core.tblproductos SET stock_online = GREATEST(stock_online - $1, 0), updated_at = NOW() WHERE id = $2', [item.cantidad, item.producto_id]);
+      // Registrar el descuento real por línea: es lo que se repone al cancelar
+      const stockResult = await client.query(
+        `UPDATE core.tblproductos p
+         SET stock_online = GREATEST(p.stock_online - $1, 0), updated_at = NOW()
+         FROM (SELECT id, stock_online AS stock_anterior FROM core.tblproductos WHERE id = $2 FOR UPDATE) prev
+         WHERE p.id = prev.id
+         RETURNING p.stock_online, prev.stock_anterior`,
+        [item.cantidad, item.producto_id]
+      );
+      const stockDescontado = stockResult.rows.length > 0
+        ? stockResult.rows[0].stock_anterior - stockResult.rows[0].stock_online
+        : 0;
+      await client.query(`INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal, stock_descontado) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal, stockDescontado]);
     }
     await client.query('DELETE FROM core.tblcarrito_items WHERE usuario_id = $1', [userId]);
     await client.query(`INSERT INTO core.tblpagos (pedido_id, monto_subtotal, monto_total, estado, created_at) VALUES ($1,$2,$3,'pendiente',NOW())`, [pedido.id, total, total]);
@@ -198,20 +209,41 @@ router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gener
 
 // ── Cambiar estado del pedido (empleado+) ──
 router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  const client = await pool.connect();
   try {
     const { estado, nota_cancelacion } = req.body;
     // Los estados de entrega (asignado/en_camino/entregado/entrega_fallida) los maneja
     // normalmente el flujo de /api/entregas; aquí quedan disponibles como corrección manual.
     const validos = ['pendiente', 'en_preparacion', 'listo', 'completado', 'cancelado', 'asignado', 'en_camino', 'entregado', 'entrega_fallida'];
     if (!validos.includes(estado)) return res.status(400).json({ success: false, message: `Estado inválido. Valores: ${validos.join(', ')}` });
+
+    await client.query('BEGIN');
+    const previoResult = await client.query('SELECT estado FROM core.tblpedidos WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (previoResult.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Pedido no encontrado' }); }
+    const estadoPrevio = previoResult.rows[0].estado;
+
     const updates = [estado];
     let query = 'UPDATE core.tblpedidos SET estado = $1, updated_at = NOW()';
     let pi = 2;
     if (estado === 'cancelado' && nota_cancelacion) { query += `, nota_cancelacion = $${pi}`; updates.push(nota_cancelacion); pi++; }
     query += ` WHERE id = $${pi} RETURNING *`;
     updates.push(req.params.id);
-    const result = await pool.query(query, updates);
-    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+    const result = await client.query(query, updates);
+
+    // Cancelación: reponer el inventario que este pedido descontó.
+    // stock_descontado queda en 0 tras reponer, así una re-cancelación no
+    // duplica la devolución (y reactivar un cancelado no vuelve a descontar).
+    if (estado === 'cancelado' && estadoPrevio !== 'cancelado') {
+      await client.query(
+        `UPDATE core.tblproductos p
+         SET stock_online = p.stock_online + i.stock_descontado, updated_at = NOW()
+         FROM core.tblpedido_items i
+         WHERE i.pedido_id = $1 AND i.producto_id = p.id AND i.stock_descontado > 0`,
+        [req.params.id]
+      );
+      await client.query('UPDATE core.tblpedido_items SET stock_descontado = 0 WHERE pedido_id = $1', [req.params.id]);
+    }
+    await client.query('COMMIT');
 
     // Crear notificación para el cliente
     const pedido = result.rows[0];
@@ -260,9 +292,10 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
 
     res.json({ success: true, pedido });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error PUT /pedidos/:id/estado:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar estado' });
-  }
+  } finally { client.release(); }
 });
 
 // ── Aprobar un pedido programado "por confirmar" (empleado+) ──
@@ -339,6 +372,17 @@ router.put('/:id/rechazar', verifyToken, verifyRole('empleado', 'gerencia', 'dir
       `UPDATE core.tblpedidos SET estado = 'cancelado', por_confirmar = FALSE, nota_cancelacion = $1, updated_at = NOW() WHERE id = $2`,
       [String(motivo).trim(), req.params.id]
     );
+
+    // Reponer el inventario que sí se descontó (los items "sin stock" del
+    // pedido por confirmar quedaron con stock_descontado = 0)
+    await client.query(
+      `UPDATE core.tblproductos p
+       SET stock_online = p.stock_online + i.stock_descontado, updated_at = NOW()
+       FROM core.tblpedido_items i
+       WHERE i.pedido_id = $1 AND i.producto_id = p.id AND i.stock_descontado > 0`,
+      [req.params.id]
+    );
+    await client.query('UPDATE core.tblpedido_items SET stock_descontado = 0 WHERE pedido_id = $1', [req.params.id]);
 
     // Solicitud de reembolso automática: aparece en Gestión de Reembolsos
     // para procesarse con el flujo normal (el cliente ya pagó en línea)

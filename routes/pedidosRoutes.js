@@ -447,4 +447,106 @@ router.put('/:id/rechazar', verifyToken, verifyRole('empleado', 'gerencia', 'dir
   } finally { client.release(); }
 });
 
+// ── Cancelación por el propio cliente ──
+// Permitida solo mientras ningún repartidor haya aceptado el pedido:
+// estados pendiente o listo (al aceptar pasa a 'asignado' y ya no aplica).
+// Repone el stock descontado y genera la solicitud de reembolso automática.
+router.put('/:id/cancelar', verifyToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT p.*, u.nombre AS cliente_nombre, u.email AS cliente_email
+       FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id
+       WHERE p.id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Pedido no encontrado' }); }
+    const p = result.rows[0];
+    if (p.usuario_id !== req.user.userId) { await client.query('ROLLBACK'); return res.status(403).json({ success: false, message: 'Sin permiso' }); }
+
+    const yaTomado = ['asignado', 'en_camino'].includes(p.estado);
+    if (!['pendiente', 'listo'].includes(p.estado)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: yaTomado ? 'Un repartidor ya tomó tu pedido; ya no es posible cancelarlo' : 'Este pedido ya no puede cancelarse',
+      });
+    }
+    // Doble seguro contra la carrera con la aceptación del repartidor
+    const entregaActiva = await client.query(
+      `SELECT 1 FROM core.tblentregas WHERE pedido_id = $1 AND estado IN ('asignada', 'en_camino')`,
+      [p.id]
+    );
+    if (entregaActiva.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: 'Un repartidor ya tomó tu pedido; ya no es posible cancelarlo' });
+    }
+
+    await client.query(
+      `UPDATE core.tblpedidos SET estado = 'cancelado', por_confirmar = FALSE, nota_cancelacion = $1, updated_at = NOW() WHERE id = $2`,
+      ['Cancelado por el cliente antes de la entrega', p.id]
+    );
+
+    // Reponer exactamente el inventario que se descontó al pagar
+    await client.query(
+      `UPDATE core.tblproductos pr
+       SET stock_online = pr.stock_online + i.stock_descontado, updated_at = NOW()
+       FROM core.tblpedido_items i
+       WHERE i.pedido_id = $1 AND i.producto_id = pr.id AND i.stock_descontado > 0`,
+      [p.id]
+    );
+    await client.query('UPDATE core.tblpedido_items SET stock_descontado = 0 WHERE pedido_id = $1', [p.id]);
+
+    // Reembolso automático: el cliente ya pagó en línea
+    await client.query(
+      `INSERT INTO core.tblreembolsos (pedido_id, producto_id, usuario_id, monto, motivo, descripcion, fotos_evidencia, estado, created_at, updated_at)
+       VALUES ($1, NULL, $2, $3, 'otro', $4, NULL, 'pendiente', NOW(), NOW())`,
+      [p.id, p.usuario_id, p.total, `Pedido #${p.numero} cancelado por el cliente antes de la entrega`]
+    );
+    await client.query('COMMIT');
+
+    const { notificarConEmail, crearNotificacion } = require('../services/notificacionHelper');
+    const safeNumero = he.escape(String(p.numero));
+    const totalTxt = parseFloat(p.total).toFixed(2);
+
+    // Confirmación al cliente (notificación + correo)
+    await notificarConEmail({
+      usuario_id: p.usuario_id,
+      tipo: 'pedido',
+      titulo: 'Tu pedido fue cancelado',
+      mensaje: `Cancelaste tu pedido #${p.numero}. Tu pago de $${totalTxt} será reembolsado; ya generamos la solicitud.`,
+      email: p.cliente_email,
+      nombre: p.cliente_nombre,
+      asunto: `Pedido #${safeNumero} cancelado — Pier Repostería`,
+      contenidoHtml: `
+        <h2>Pedido cancelado</h2>
+        <div class="highlight-box">
+          <p><strong>Pedido:</strong> #${safeNumero}</p>
+          <p><strong>Monto a reembolsar:</strong> $${he.escape(totalTxt)} MXN</p>
+        </div>
+        <p>Cancelaste tu pedido a tiempo y ya generamos la solicitud de reembolso; te avisaremos cuando se procese.</p>
+        <p>¡Esperamos consentirte pronto! 🧁</p>
+      `,
+    });
+
+    // Aviso al personal para que no lo prepare ni lo despache
+    try {
+      const personal = await pool.query(`SELECT id FROM core.tblusuarios WHERE rol IN ('empleado', 'gerencia') AND activo = true`);
+      await Promise.all(personal.rows.map(u => crearNotificacion({
+        usuario_id: u.id,
+        tipo: 'alerta',
+        titulo: 'Pedido cancelado por el cliente',
+        mensaje: `El cliente canceló el pedido #${p.numero} ($${totalTxt}) antes de ser tomado por un repartidor. Se generó su reembolso.`,
+      })));
+    } catch (e) { console.error('Aviso al personal falló:', e.message); }
+
+    res.json({ success: true, message: 'Pedido cancelado; tu reembolso ya está en proceso' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error PUT /pedidos/:id/cancelar:', error.message);
+    res.status(500).json({ success: false, message: 'Error al cancelar el pedido' });
+  } finally { client.release(); }
+});
+
 module.exports = router;

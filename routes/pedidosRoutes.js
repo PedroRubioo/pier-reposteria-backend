@@ -4,6 +4,7 @@ const router = express.Router();
 const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { calcularRiesgo } = require('../utils/riesgoCancelacion');
 
 function generarNumeroPedido() {
   const fecha = new Date();
@@ -155,6 +156,29 @@ router.get('/conteo-estados', verifyToken, verifyRole('empleado', 'gerencia', 'd
   } catch (error) {
     console.error('Error GET /pedidos/conteo-estados:', error.message);
     res.status(500).json({ success: false, message: 'Error al contar pedidos' });
+  }
+});
+
+// ── Riesgo de cancelación de pedidos entrantes (empleado+) ──
+// Variables extraídas en vivo de la BD; el puntaje vive en utils/riesgoCancelacion
+router.get('/riesgos', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.id, p.total, p.tipo_entrega, p.metodo_pago, p.horario_recogida, p.horario_entrega,
+             p.created_at, u.created_at AS cliente_desde,
+             (SELECT COUNT(*)::int FROM core.tblpedidos x WHERE x.usuario_id = p.usuario_id AND x.estado = 'completado' AND x.id <> p.id) AS pedidos_previos,
+             (SELECT COUNT(*)::int FROM core.tblpedidos x WHERE x.usuario_id = p.usuario_id AND x.estado = 'cancelado') AS cancelaciones_previas,
+             (SELECT COALESCE(SUM(i.cantidad), 0)::int FROM core.tblpedido_items i WHERE i.pedido_id = p.id) AS num_items
+      FROM core.tblpedidos p
+      JOIN core.tblusuarios u ON u.id = p.usuario_id
+      WHERE p.estado IN ('pendiente', 'listo')
+    `);
+    const riesgos = {};
+    for (const fila of result.rows) riesgos[fila.id] = calcularRiesgo(fila);
+    res.json({ success: true, riesgos });
+  } catch (error) {
+    console.error('Error GET /pedidos/riesgos:', error.message);
+    res.status(500).json({ success: false, message: 'Error al calcular riesgos' });
   }
 });
 

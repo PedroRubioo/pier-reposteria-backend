@@ -121,13 +121,47 @@ async function calcularSegmentos() {
     prod_dist_prom: g.reduce((s, c) => s + c.prod_dist, 0) / Math.max(g.length, 1),
   })).filter(p => p.clientes > 0);
 
-  // Etiquetas de negocio por perfil
-  const porMonto = [...perfiles].sort((a, b) => b.monto_prom - a.monto_prom);
-  const vip = porMonto[0];
-  const restantes = perfiles.filter(p => p !== vip);
-  const porRecencia = [...restantes].sort((a, b) => b.recencia_prom - a.recencia_prom);
-  const inactivo = porRecencia[0] || null;
-  const ocasionales = restantes.filter(p => p !== inactivo);
+  // Etiquetas de negocio coherentes:
+  // 1) Inactivos = el cluster con MAYOR recencia promedio (los más dormidos)
+  // 2) VIP = entre los restantes, el de mayor valor combinado (monto y
+  //    frecuencia altos, recencia baja; métricas normalizadas 0-1)
+  // 3) Ocasionales = el resto
+  // Garantía: el VIP nunca puede mostrar mayor recencia promedio que
+  // Inactivos, porque Inactivos se toma primero como el máximo global.
+  let vip = null;
+  let inactivo = null;
+  let ocasionales = [];
+  if (perfiles.length === 1) {
+    ocasionales = perfiles;
+  } else {
+    inactivo = perfiles.reduce((a, b) => (b.recencia_prom > a.recencia_prom ? b : a));
+    const restantes = perfiles.filter(p => p !== inactivo);
+    const normalizador = (valores) => {
+      const min = Math.min(...valores);
+      const max = Math.max(...valores);
+      return v => (max > min ? (v - min) / (max - min) : 0.5);
+    };
+    const nMonto = normalizador(restantes.map(p => p.monto_prom));
+    const nFrecuencia = normalizador(restantes.map(p => p.frecuencia_prom));
+    const nRecencia = normalizador(restantes.map(p => p.recencia_prom));
+    const valorCombinado = p => nMonto(p.monto_prom) + nFrecuencia(p.frecuencia_prom) + (1 - nRecencia(p.recencia_prom));
+    vip = restantes.reduce((a, b) => (valorCombinado(b) > valorCombinado(a) ? b : a));
+    ocasionales = restantes.filter(p => p !== vip);
+  }
+
+  // Separación débil entre clusters (perfiles casi iguales, como con los
+  // datos semilla): si 2 de las 3 métricas RFM varían menos del 15% de su
+  // media entre clusters, la segmentación se marca como preliminar
+  const dispersionRelativa = (valores) => {
+    const media = valores.reduce((s, v) => s + v, 0) / valores.length;
+    return media > 0 ? (Math.max(...valores) - Math.min(...valores)) / media : 0;
+  };
+  const metricasDebiles = [
+    dispersionRelativa(perfiles.map(p => p.recencia_prom)),
+    dispersionRelativa(perfiles.map(p => p.frecuencia_prom)),
+    dispersionRelativa(perfiles.map(p => p.monto_prom)),
+  ].filter(m => m < 0.15).length;
+  const segmentacionPreliminar = perfiles.length < 2 || metricasDebiles >= 2;
 
   const aSegmento = (perfil, nombre) => ({
     nombre,
@@ -140,11 +174,12 @@ async function calcularSegmentos() {
     prod_dist_prom: Math.round(perfil.prod_dist_prom),
   });
 
-  const segmentos = [aSegmento(vip, 'Clientes VIP')];
+  const segmentos = [];
+  if (vip) segmentos.push(aSegmento(vip, 'Clientes VIP'));
   for (const p of ocasionales) segmentos.push(aSegmento(p, 'Ocasionales'));
   if (inactivo) segmentos.push(aSegmento(inactivo, 'Inactivos'));
 
-  const respuesta = { total_clientes: clientes.length, segmentos };
+  const respuesta = { total_clientes: clientes.length, segmentacion_preliminar: segmentacionPreliminar, segmentos };
   cache = { calculadoEn: Date.now(), respuesta };
   return respuesta;
 }

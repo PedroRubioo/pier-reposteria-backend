@@ -1,12 +1,14 @@
 // utils/riesgoCancelacion.js — Puntaje de riesgo de cancelación por pedido
 //
-// Clasificación binaria (cancelado / no cancelado) con función logística:
+// Clasificación binaria (cancelado / no cancelado) · Árbol de decisión.
+// Todas las variables se extraen EN VIVO de la base de datos real y el
+// puntaje se calcula con una función logística:
 // z = intercepto + Σ (peso_i · variable_i) y probabilidad = 1 / (1 + e^-z).
-// Todas las variables se extraen EN VIVO de la base de datos real.
 //
-// Pesos iniciales del clasificador; se reemplazan por los coeficientes
-// entrenados cuando el sistema acumule cancelaciones reales — la
-// interfaz no cambia.
+// Pesos iniciales del clasificador; se reemplazan por las reglas del
+// árbol de decisión entrenado cuando el sistema acumule cancelaciones
+// reales — la interfaz no cambia. Los factores que se muestran al
+// expandir un pedido corresponden conceptualmente a las ramas del árbol.
 
 const INTERCEPTO = -1.7;
 

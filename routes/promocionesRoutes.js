@@ -82,6 +82,8 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
       }
     }
 
+    const { registrarAuditoria } = require('../utils/auditoria');
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó promoción', entidad: 'promocion', entidad_id: result.rows[0].id, detalles: `${tipo}${descuento_porcentaje ? ` · ${descuento_porcentaje}% OFF` : ''}${nombre_temporada ? ` · ${nombre_temporada}` : ''}` });
     res.status(201).json({ success: true, promocion: result.rows[0] });
   } catch (error) {
     console.error('Error POST /promociones:', error.message);
@@ -102,6 +104,8 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
       [tipo, producto_id, estado, descuento_porcentaje, precio_original, precio_oferta, fecha_inicio, fecha_fin, nombre_temporada, badge_destacado, titulo_banner, subtitulo_banner, descripcion_banner, codigo_descuento, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
+    const { registrarAuditoria } = require('../utils/auditoria');
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Actualizó promoción', entidad: 'promocion', entidad_id: result.rows[0].id, detalles: `${result.rows[0].tipo}${estado ? ` · estado: ${estado}` : ''}` });
     res.json({ success: true, promocion: result.rows[0] });
   } catch (error) {
     console.error('Error PUT /promociones/:id:', error.message);
@@ -114,6 +118,8 @@ router.delete('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion
   try {
     const result = await pool.query('DELETE FROM core.tblpromociones WHERE id = $1 RETURNING id', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
+    const { registrarAuditoria } = require('../utils/auditoria');
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Eliminó promoción', entidad: 'promocion', entidad_id: result.rows[0].id });
     res.json({ success: true, message: 'Promoción eliminada' });
   } catch (error) {
     console.error('Error DELETE /promociones/:id:', error.message);

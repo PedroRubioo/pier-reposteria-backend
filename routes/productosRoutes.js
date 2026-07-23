@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria } = require('../utils/auditoria');
 
 // ══════════════════════════════════════
 // PÚBLICOS (sin auth)
@@ -300,6 +301,7 @@ router.post('/productos', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       enviado_por: req.user.userId
     });
 
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó producto', entidad: 'producto', entidad_id: result.rows[0].id, detalles: `"${nombre}" desde $${precio_chico}` });
     res.status(201).json({ success: true, producto: result.rows[0] });
   } catch (error) {
     console.error('Error POST /productos:', error.message);
@@ -322,6 +324,10 @@ router.put('/productos/:id', verifyToken, verifyRole('empleado', 'gerencia', 'di
       WHERE id = $17 RETURNING *
     `, [nombre, descripcion, categoria_id, precio_chico, precio_grande, imagen_url, imagen_public_id, imagenes ? JSON.stringify(imagenes) : null, ingredientes, sabor, tamano, tipo, popular, es_nuevo, stock_online, activo, id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+    registrarAuditoria({
+      usuario_id: req.user.userId, accion: 'Actualizó producto', entidad: 'producto', entidad_id: result.rows[0].id,
+      detalles: `"${result.rows[0].nombre}"${stock_online !== undefined && stock_online !== null ? ` · stock a ${stock_online}` : ''}${activo === false ? ' · desactivado' : ''}`,
+    });
     res.json({ success: true, producto: result.rows[0] });
   } catch (error) {
     console.error('Error PUT /productos/:id:', error.message);
@@ -333,6 +339,7 @@ router.delete('/productos/:id', verifyToken, verifyRole('empleado', 'gerencia', 
   try {
     const result = await pool.query('UPDATE core.tblproductos SET activo = false, updated_at = NOW() WHERE id = $1 RETURNING id, nombre', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrado' });
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Desactivó producto', entidad: 'producto', entidad_id: result.rows[0].id, detalles: `"${result.rows[0].nombre}"` });
     res.json({ success: true, message: `"${result.rows[0].nombre}" desactivado` });
   } catch (error) {
     console.error('Error DELETE /productos/:id:', error.message);

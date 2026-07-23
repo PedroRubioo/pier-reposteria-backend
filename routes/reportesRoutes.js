@@ -76,4 +76,56 @@ router.get('/auditoria', verifyToken, verifyRole('direccion_general'), async (re
   }
 });
 
+// ── Actividad del equipo (solo dirección general) ──
+// Todo calculado en vivo: quién está activo, qué movimientos registró
+// cada quien (auditoría de negocio), entregas por repartidor, zonas con
+// más envíos y avisos de demora.
+const ACCIONES_TECNICAS = ['EXPLAIN ANALYZE', 'Prueba de acceso BD', 'Configuración de seguridad BD'];
+
+router.get('/actividad-equipo', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+  try {
+    const [equipoR, accionesR, entregasR, movimientosR, zonasR, kpisR] = await Promise.all([
+      pool.query(`SELECT id, nombre, apellido, rol, activo, ultimo_acceso
+                  FROM core.tblusuarios WHERE rol IN ('empleado', 'gerencia', 'repartidor') ORDER BY rol, nombre`),
+      pool.query(`SELECT usuario_id, COUNT(*)::int AS acciones, MAX(created_at) AS ultima_accion
+                  FROM core.tblauditoria
+                  WHERE usuario_id IS NOT NULL AND accion <> ALL($1)
+                  GROUP BY usuario_id`, [ACCIONES_TECNICAS]),
+      pool.query(`SELECT repartidor_id,
+                         COUNT(*) FILTER (WHERE estado = 'entregada')::int AS entregadas,
+                         COUNT(*) FILTER (WHERE estado IN ('asignada', 'en_camino'))::int AS activas
+                  FROM core.tblentregas GROUP BY repartidor_id`),
+      pool.query(`SELECT a.accion, a.entidad, a.detalles, a.created_at, u.nombre, u.apellido, u.rol
+                  FROM core.tblauditoria a LEFT JOIN core.tblusuarios u ON u.id = a.usuario_id
+                  WHERE a.accion <> ALL($1)
+                  ORDER BY a.created_at DESC LIMIT 30`, [ACCIONES_TECNICAS]),
+      pool.query(`SELECT direccion_entrega->>'zona' AS zona, direccion_entrega->>'colonia' AS colonia, COUNT(*)::int AS pedidos
+                  FROM core.tblpedidos
+                  WHERE tipo_entrega = 'domicilio' AND direccion_entrega IS NOT NULL AND estado <> 'cancelado'
+                  GROUP BY 1, 2 ORDER BY pedidos DESC LIMIT 8`),
+      pool.query(`SELECT
+                    (SELECT COUNT(*)::int FROM core.tblnotificaciones WHERE titulo = 'Tu pedido tardará un poco más') AS avisos_demora,
+                    (SELECT COUNT(DISTINCT usuario_id)::int FROM core.tblpedidos WHERE created_at > NOW() - INTERVAL '30 days' AND estado <> 'cancelado') AS clientes_atendidos_30d,
+                    (SELECT COUNT(*)::int FROM core.tblpedidos WHERE created_at > NOW() - INTERVAL '30 days' AND estado IN ('completado', 'entregado')) AS pedidos_cerrados_30d,
+                    (SELECT COUNT(*)::int FROM core.tblproductos WHERE updated_at > NOW() - INTERVAL '30 days') AS productos_movidos_30d,
+                    (SELECT COUNT(*)::int FROM core.tblpromociones WHERE created_at > NOW() - INTERVAL '30 days') AS promos_creadas_30d`),
+    ]);
+
+    const accionesPor = new Map(accionesR.rows.map(r => [r.usuario_id, r]));
+    const entregasPor = new Map(entregasR.rows.map(r => [r.repartidor_id, r]));
+    const equipo = equipoR.rows.map(u => ({
+      ...u,
+      acciones: accionesPor.get(u.id)?.acciones || 0,
+      ultima_accion: accionesPor.get(u.id)?.ultima_accion || null,
+      entregadas: entregasPor.get(u.id)?.entregadas || 0,
+      entregas_activas: entregasPor.get(u.id)?.activas || 0,
+    }));
+
+    res.json({ success: true, equipo, movimientos: movimientosR.rows, zonas: zonasR.rows, kpis: kpisR.rows[0] });
+  } catch (error) {
+    console.error('Error GET /reportes/actividad-equipo:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener la actividad del equipo' });
+  }
+});
+
 module.exports = router;

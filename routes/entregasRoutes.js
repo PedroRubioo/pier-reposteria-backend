@@ -111,7 +111,7 @@ router.post('/avisar-demora', verifyToken, verifyRole('empleado', 'gerencia', 'd
     const { pedido_id } = req.body;
     if (!pedido_id) return res.status(400).json({ success: false, message: 'pedido_id es requerido' });
     const result = await pool.query(
-      `SELECT p.numero, p.usuario_id, p.tipo_entrega, p.estado, u.nombre, u.email
+      `SELECT p.numero, p.usuario_id, p.tipo_entrega, p.estado, p.direccion_entrega, u.nombre, u.email
        FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id WHERE p.id = $1`,
       [pedido_id]
     );
@@ -139,6 +139,9 @@ router.post('/avisar-demora', verifyToken, verifyRole('empleado', 'gerencia', 'd
         <p>Agradecemos tu paciencia. ¡Vale la pena la espera! 🧁</p>
       `,
     });
+    const { registrarAuditoria } = require('../utils/auditoria');
+    const destinoDemora = p.direccion_entrega ? `${p.direccion_entrega.colonia || ''}${p.direccion_entrega.zona ? ` (${p.direccion_entrega.zona})` : ''}` : 'sin dirección';
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Avisó demora al cliente', entidad: 'pedido', entidad_id: pedido_id, detalles: `#${p.numero} · destino: ${destinoDemora}` });
     res.json({ success: true, message: `Aviso de demora enviado al cliente del pedido #${p.numero}` });
   } catch (error) {
     console.error('Error POST /entregas/avisar-demora:', error.message);

@@ -11,7 +11,7 @@ const { verifyToken, verifyRole } = require('../middleware/auth');
 const { registrarAuditoria } = require('../utils/auditoria');
 const {
   fechaISO, variablesCalendario, predecirUnidades,
-  basePorProducto, historicoAnioAnterior, cargarFestivos,
+  basePorProducto, historicoAnioAnterior, cargarFestivos, infoModelo,
 } = require('../utils/prediccionDemanda');
 
 const SOLO_DIRECCION = verifyRole('direccion_general');
@@ -124,7 +124,12 @@ router.get('/demanda/mes', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       for (const [productoId, info] of base) {
         if (!idsActivos.has(productoId)) continue;
         const promedioDow = info.dow.get(vars.dia_sem) ?? (info.n ? info.suma / info.n : 0);
-        total += predecirUnidades({ promedio_dow: promedioDow, promedio_general: info.n ? info.suma / info.n : 0 }, vars);
+        const { unidades } = predecirUnidades(
+          { promedio_dow: promedioDow, promedio_general: info.n ? info.suma / info.n : 0 },
+          vars,
+          productoId
+        );
+        total += unidades;
       }
       dias.push({
         fecha: iso,
@@ -171,11 +176,11 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       const prod = info.get(productoId);
       if (!prod) continue; // producto inactivo: no se produce
       const promedioDow = datos.dow.get(vars.dia_sem) ?? (datos.n ? datos.suma / datos.n : 0);
-      const unidades = predecirUnidades({
+      const { unidades, origen } = predecirUnidades({
         promedio_dow: promedioDow,
         promedio_general: datos.n ? datos.suma / datos.n : 0,
         hist_anio_ant: historico.get(productoId) ?? null,
-      }, vars);
+      }, vars, productoId);
       total += unidades;
       productos.push({
         producto_id: productoId,
@@ -183,6 +188,7 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
         categoria: prod.categoria,
         stock_online: prod.stock_online,
         unidades,
+        origen,
         con_historico_anual: historico.has(productoId),
       });
     }
@@ -202,6 +208,8 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       total_unidades: total,
       productos: productos.slice(0, limite),
       categorias,
+      modelo: infoModelo(),
+      estimados_con_respaldo: productos.filter(p => p.origen === 'respaldo').length,
     });
   } catch (error) {
     console.error('Error GET /demanda/dia:', error.message);

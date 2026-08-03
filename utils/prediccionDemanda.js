@@ -99,10 +99,12 @@ const MULT_ANTICIPACION = [
   { hasta: 7, factor: 1.10 },
   { hasta: 14, factor: 1.03 },
 ];
+// Cola de rezagados: después de la festividad la venta sigue elevada y
+// va cediendo (quien no alcanzó a comprar, compra los días siguientes)
 const MULT_COLA = [
-  { hasta: 1, factor: 0.88 },  // día siguiente: la gente ya festejó
-  { hasta: 2, factor: 0.94 },
-  { hasta: 4, factor: 0.98 },
+  { hasta: 1, factor: 1.15 },
+  { hasta: 2, factor: 1.08 },
+  { hasta: 3, factor: 1.03 },
 ];
 const MULT_TEMPORADA = { primavera: 1.05, verano: 0.95, otoño: 1.02, invierno: 1.08 };
 const MULT_FINDE_FESTIVO = 1.08; // festividad pegada al fin de semana: se celebra más

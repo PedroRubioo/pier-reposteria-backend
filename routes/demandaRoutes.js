@@ -105,7 +105,15 @@ router.get('/demanda/mes', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Indica año y mes' });
     }
 
-    const [festivos, base] = await Promise.all([cargarFestivos(), basePorProducto()]);
+    const [festivos, base, activos] = await Promise.all([
+      cargarFestivos(),
+      basePorProducto(),
+      // Mismo universo que el detalle del día: solo lo que hoy se produce
+      pool.query(`SELECT p.id FROM core.tblproductos p
+                  JOIN core.tblcategorias c ON c.id = p.categoria_id
+                  WHERE p.activo = true AND c.activo = true`),
+    ]);
+    const idsActivos = new Set(activos.rows.map(r => r.id));
     const diasEnMes = new Date(Date.UTC(anio, mes, 0)).getUTCDate();
 
     const dias = [];
@@ -113,7 +121,8 @@ router.get('/demanda/mes', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       const iso = `${anio}-${String(mes).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       const vars = variablesCalendario(iso, festivos);
       let total = 0;
-      for (const [, info] of base) {
+      for (const [productoId, info] of base) {
+        if (!idsActivos.has(productoId)) continue;
         const promedioDow = info.dow.get(vars.dia_sem) ?? (info.n ? info.suma / info.n : 0);
         total += predecirUnidades({ promedio_dow: promedioDow, promedio_general: info.n ? info.suma / info.n : 0 }, vars);
       }
@@ -150,7 +159,7 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       historicoAnioAnterior(fecha),
       pool.query(`SELECT p.id, p.nombre, p.stock_online, c.nombre AS categoria
                   FROM core.tblproductos p JOIN core.tblcategorias c ON c.id = p.categoria_id
-                  WHERE p.activo = true`),
+                  WHERE p.activo = true AND c.activo = true`),
     ]);
 
     const vars = variablesCalendario(fecha, festivos);

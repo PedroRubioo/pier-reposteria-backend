@@ -11,7 +11,7 @@ const { verifyToken, verifyRole } = require('../middleware/auth');
 const { registrarAuditoria } = require('../utils/auditoria');
 const {
   fechaISO, variablesCalendario, predecirUnidades,
-  basePorProducto, historicoAnioAnterior, cargarFestivos, infoModelo,
+  basePorProducto, historicoAnioAnterior, cargarFestivos, infoModelo, fueraDeRango,
 } = require('../utils/prediccionDemanda');
 
 const SOLO_DIRECCION = verifyRole('direccion_general');
@@ -142,7 +142,16 @@ router.get('/demanda/mes', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       });
     }
 
-    res.json({ success: true, dias, productos_evaluados: base.size });
+    // Se advierte con el día 15 como representante del mes
+    const horizonte = fueraDeRango(`${anio}-${String(mes).padStart(2, '0')}-15`);
+
+    res.json({
+      success: true,
+      dias,
+      productos_evaluados: base.size,
+      modelo: infoModelo(),
+      horizonte,
+    });
   } catch (error) {
     console.error('Error GET /demanda/mes:', error.message);
     res.status(500).json({ success: false, message: 'Error al calcular la demanda del mes' });
@@ -176,7 +185,7 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       const prod = info.get(productoId);
       if (!prod) continue; // producto inactivo: no se produce
       const promedioDow = datos.dow.get(vars.dia_sem) ?? (datos.n ? datos.suma / datos.n : 0);
-      const { unidades, origen } = predecirUnidades({
+      const { unidades, origen, categorias_desconocidas } = predecirUnidades({
         promedio_dow: promedioDow,
         promedio_general: datos.n ? datos.suma / datos.n : 0,
         hist_anio_ant: historico.get(productoId) ?? null,
@@ -189,6 +198,7 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
         stock_online: prod.stock_online,
         unidades,
         origen,
+        categorias_desconocidas,
         con_historico_anual: historico.has(productoId),
       });
     }
@@ -209,7 +219,11 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
       productos: productos.slice(0, limite),
       categorias,
       modelo: infoModelo(),
+      horizonte: fueraDeRango(fecha),
       estimados_con_respaldo: productos.filter(p => p.origen === 'respaldo').length,
+      categorias_desconocidas: [...new Set(
+        productos.flatMap(p => p.categorias_desconocidas || [])
+      )],
     });
   } catch (error) {
     console.error('Error GET /demanda/dia:', error.message);

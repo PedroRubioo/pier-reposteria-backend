@@ -114,11 +114,11 @@ function variablesCalendario(fechaIso, festivos) {
  * @param {object} base respaldo histórico { promedio_dow, promedio_general }
  * @param {object} vars variables de calendario de la fecha
  * @param {number} productoId producto a estimar
- * @returns {{ unidades: number, origen: 'modelo'|'respaldo' }}
+ * @returns {{ unidades: number, origen: 'modelo'|'respaldo', categorias_desconocidas?: string[] }}
  */
 function predecirUnidades(base, vars, productoId) {
   if (modelo.hayModelo() && modelo.conoceProducto(productoId)) {
-    const unidades = modelo.predecir({
+    const vector = {
       dia_sem: vars.dia_sem,
       mes: vars.mes,
       festivo: vars.festivo,
@@ -129,8 +129,17 @@ function predecirUnidades(base, vars, productoId) {
       temporada: vars.temporada,
       prox_festivo: vars.prox_festivo || SIN_FESTIVO_CERCA,
       producto_id: productoId,
-    });
-    if (unidades !== null) return { unidades, origen: 'modelo' };
+    };
+    const unidades = modelo.predecir(vector);
+    if (unidades !== null) {
+      // Categorías que el modelo no vio (p. ej. temporada 'verano'):
+      // aportan cero, y se reportan para que quede rastro de que la
+      // consulta salió del terreno con el que se entrenó.
+      const desconocidas = modelo.categoriasDesconocidas(vector);
+      return desconocidas.length > 0
+        ? { unidades, origen: 'modelo', categorias_desconocidas: desconocidas }
+        : { unidades, origen: 'modelo' };
+    }
   }
 
   // Respaldo: promedio real del producto para ese día de la semana.
@@ -204,5 +213,6 @@ module.exports = {
   historicoAnioAnterior,
   cargarFestivos,
   infoModelo: modelo.infoModelo,
+  fueraDeRango: modelo.fueraDeRango,
   TOPE_DIAS,
 };

@@ -74,6 +74,58 @@ function tendenciaDe(fechaIso) {
   );
 }
 
+// Se avisa una sola vez por categoría para no inundar el log: el
+// calendario evalúa ~91 productos × 31 días en una sola petición.
+const categoriasAvisadas = new Set();
+
+/**
+ * Categorías del vector que el modelo no vio al entrenar. Cada una aporta
+ * `valor_si_falta_categoria` (cero), que es el comportamiento correcto,
+ * pero conviene dejar rastro de que la consulta salió del terreno
+ * conocido. Caso típico: temporada 'verano', porque el histórico va de
+ * noviembre a marzo.
+ */
+function categoriasDesconocidas(vars) {
+  const c = cargar();
+  if (!c) return [];
+  const faltantes = [];
+  for (const nombre of VARIABLES_CATEGORICAS) {
+    const valor = vars[nombre];
+    if (valor === null || valor === undefined) continue;
+    const clave = `${nombre}=${valor}`;
+    if (c.coeficientes[clave] === undefined) {
+      faltantes.push(clave);
+      if (!categoriasAvisadas.has(clave)) {
+        categoriasAvisadas.add(clave);
+        console.warn(`[modeloDemanda] categoría fuera del entrenamiento: ${clave} · aporta ${c.valor_si_falta_categoria || 0}`);
+      }
+    }
+  }
+  return faltantes;
+}
+
+/**
+ * ¿La fecha consultada cae fuera del periodo con el que se entrenó?
+ * No cambia el cálculo: solo permite advertirlo en la interfaz. La
+ * regresión extrapola la tendencia linealmente, así que cuanto más lejos
+ * queda la fecha, menos respaldo empírico tiene la estimación.
+ */
+function fueraDeRango(fechaIso) {
+  const c = cargar();
+  if (!c?.rango_entrenamiento) return null;
+  const { desde, hasta } = c.rango_entrenamiento;
+  const MS_DIA = 86400000;
+  const t = Date.parse(`${fechaIso}T00:00:00Z`);
+  const diasDespues = Math.round((t - Date.parse(`${hasta}T00:00:00Z`)) / MS_DIA);
+  const diasAntes = Math.round((Date.parse(`${desde}T00:00:00Z`) - t) / MS_DIA);
+  const distancia = Math.max(diasDespues, diasAntes, 0);
+  return {
+    fuera: distancia > 0,
+    dias: distancia,
+    rango: { desde, hasta },
+  };
+}
+
 /**
  * Evalúa el modelo para un vector de variables.
  * @param {object} vars dia_sem, mes, festivo, dias_festivo, dias_desde,
@@ -147,6 +199,8 @@ module.exports = {
   hayModelo,
   conoceProducto,
   tendenciaDe,
+  categoriasDesconocidas,
+  fueraDeRango,
   predecir,
   infoModelo,
   validarContraCasosPrueba,

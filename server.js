@@ -192,6 +192,7 @@ const zonasEnvioRoutes = require('./routes/zonasEnvioRoutes');
 const entregasRoutes = require('./routes/entregasRoutes');
 const recomendacionesRoutes = require('./routes/recomendacionesRoutes');
 const segmentosRoutes = require('./routes/segmentosRoutes');
+const demandaRoutes = require('./routes/demandaRoutes');
 
 
 
@@ -226,6 +227,7 @@ app.use('/api/zonas-envio', zonasEnvioRoutes);
 app.use('/api/entregas', entregasRoutes);
 app.use('/api/recomendaciones', recomendacionesRoutes);
 app.use('/api/segmentos-clientes', segmentosRoutes);
+app.use('/api', demandaRoutes);
 
 
 // ========================================

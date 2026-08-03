@@ -17,12 +17,14 @@ let cache = { calculadoEn: 0, similares: null };
 async function obtenerSimilares() {
   if (cache.similares && Date.now() - cache.calculadoEn < TTL_CACHE_MS) return cache.similares;
 
+  // Ventas consumadas: recoger en sucursal ('completado') y entrega a
+  // domicilio ('entregado') cuentan igual como compra del cliente
   const result = await pool.query(`
     SELECT p.usuario_id, i.producto_id, SUM(i.cantidad)::float AS unidades
     FROM core.tblpedidos p
     JOIN core.tblpedido_items i ON i.pedido_id = p.id
     JOIN core.tblusuarios u ON u.id = p.usuario_id
-    WHERE p.estado = 'completado' AND u.rol = 'cliente' AND i.producto_id IS NOT NULL
+    WHERE p.estado IN ('completado', 'entregado') AND u.rol = 'cliente' AND i.producto_id IS NOT NULL
     GROUP BY p.usuario_id, i.producto_id
   `);
 
@@ -104,7 +106,7 @@ router.get('/:productoId', async (req, res) => {
         FROM core.tblproductos p
         JOIN core.tblcategorias c ON c.id = p.categoria_id
         LEFT JOIN core.tblpedido_items i ON i.producto_id = p.id
-        LEFT JOIN core.tblpedidos pe ON pe.id = i.pedido_id AND pe.estado = 'completado'
+        LEFT JOIN core.tblpedidos pe ON pe.id = i.pedido_id AND pe.estado IN ('completado', 'entregado')
         WHERE p.activo = true AND c.activo = true AND p.stock_online > 0
           AND p.id <> ALL($1) AND ($2::int IS NULL OR p.categoria_id <> $2)
         GROUP BY p.id, p.nombre, p.precio_chico, p.precio_grande, p.imagen_url, p.stock_online, c.nombre

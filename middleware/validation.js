@@ -62,6 +62,14 @@ function sanitizeRequestMiddleware(req, res, next) {
       return next();
     }
 
+    // 🔧 EXCEPCIÓN: comandas. Cada texto se valida campo por campo en
+    // utils/comandas.js, el SQL es parametrizado y React escapa al mostrar.
+    // Escapar aquí guardaría "&amp;" o quitaría "$" y "{}" de leyendas y
+    // notas, y cada edición crearía una versión "fantasma" para producción.
+    if (req.path === '/api/comandas' || req.path.startsWith('/api/comandas/')) {
+      return next();
+    }
+
     if (req.body) {
       req.body = sanitizeObject(req.body);
     }

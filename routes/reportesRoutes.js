@@ -85,8 +85,10 @@ const ACCIONES_TECNICAS = ['EXPLAIN ANALYZE', 'Prueba de acceso BD', 'Configurac
 router.get('/actividad-equipo', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   try {
     const [equipoR, accionesR, entregasR, movimientosR, zonasR, kpisR] = await Promise.all([
+      // rol como texto: no falla en una base que aún no tenga los roles de
+      // producción (migración 010 pendiente)
       pool.query(`SELECT id, nombre, apellido, rol, activo, ultimo_acceso
-                  FROM core.tblusuarios WHERE rol IN ('empleado', 'gerencia', 'repartidor') ORDER BY rol, nombre`),
+                  FROM core.tblusuarios WHERE rol::text IN ('empleado', 'gerencia', 'repartidor', 'hornos', 'decoracion') ORDER BY rol, nombre`),
       pool.query(`SELECT usuario_id, COUNT(*)::int AS acciones, MAX(created_at) AS ultima_accion
                   FROM core.tblauditoria
                   WHERE usuario_id IS NOT NULL AND accion <> ALL($1)

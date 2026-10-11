@@ -47,6 +47,26 @@ async function crearNotificacionMasiva({ tipo, titulo, mensaje, enviado_por }) {
 }
 
 // ══════════════════════════════════════════════
+// NOTIFICAR A ROLES INTERNOS (p. ej. hornos y decoración)
+// ══════════════════════════════════════════════
+// Una notificación por cada usuario ACTIVO de esos roles, en un solo
+// INSERT: o la reciben todos o ninguno. Devuelve cuántas se crearon.
+async function notificarRoles(roles, { tipo, titulo, mensaje }) {
+  try {
+    const result = await pool.query(
+      `INSERT INTO core.tblnotificaciones (usuario_id, tipo, titulo, mensaje, leida, created_at)
+       SELECT id, $2, $3, $4, false, NOW() FROM core.tblusuarios
+       WHERE activo = true AND rol::text = ANY($1::text[])`,
+      [roles, tipo, titulo, mensaje]
+    );
+    return result.rowCount;
+  } catch (error) {
+    console.error('Error notificando a roles:', error.message);
+    return 0;
+  }
+}
+
+// ══════════════════════════════════════════════
 // ENVIAR EMAIL POR BREVO (para notificaciones importantes)
 // ══════════════════════════════════════════════
 async function enviarEmailNotificacion({ email, nombre, asunto, contenido }) {
@@ -134,6 +154,7 @@ async function notificarConEmail({ usuario_id, tipo, titulo, mensaje, email, nom
 module.exports = {
   crearNotificacion,
   crearNotificacionMasiva,
+  notificarRoles,
   enviarEmailNotificacion,
   notificarConEmail
 };

@@ -22,6 +22,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
 const ALEXA_CLIENT_ID = process.env.ALEXA_CLIENT_ID || 'alexa-pier';
 const ALEXA_CLIENT_SECRET = process.env.ALEXA_CLIENT_SECRET || '';
 
+// El personal de producción no usa Alexa: la skill publicada no conoce estos
+// roles y los trataría como clientes (podrían hacer pedidos)
+const ROLES_SIN_ALEXA = ['hornos', 'decoracion'];
+
 // Callback de Google para el flow de Account Linking (NO el de la web normal)
 const OAUTH_GOOGLE_CALLBACK = process.env.OAUTH_GOOGLE_CALLBACK_URL
   || 'https://pier-reposteria-backend.onrender.com/api/oauth/google/callback';
@@ -243,8 +247,10 @@ router.post('/token', async (req, res) => {
     // Marcar como usado (one-time)
     await pool.query('UPDATE core.tbloauth_codes SET usado = TRUE WHERE id = $1', [oauthCode.id]);
 
+    // Rol leído de la BD al emitir el token; producción recibe el mismo
+    // rechazo genérico que una cuenta inactiva
     const usuario = await Usuario.findById(pool, oauthCode.usuario_id);
-    if (!usuario || !usuario.activo) {
+    if (!usuario || !usuario.activo || ROLES_SIN_ALEXA.includes(usuario.rol)) {
       return res.status(400).json({ error: 'invalid_grant', error_description: 'usuario inválido o inactivo' });
     }
 

@@ -31,6 +31,10 @@ const BLOQUEO_PIN_MIN = 15;
 // Roles válidos para login por voz
 const ROLES_VOZ = ['empleado', 'gerencia', 'direccion_general'];
 
+// El personal de producción no usa Alexa: la skill publicada no conoce estos
+// roles y los trataría como clientes (podrían hacer pedidos)
+const ROLES_SIN_ALEXA = ['hornos', 'decoracion'];
+
 async function registrarIntento(device_id, codigo_empleado, exito, motivo_fallo) {
   try {
     await pool.query(
@@ -316,6 +320,11 @@ router.delete('/revocar-acceso-voz/:usuarioId',
 // para vincular la cuenta del usuario con la skill de Alexa por voz.
 // =====================================================================
 router.post('/alexa/generar-codigo', verifyToken, async (req, res) => {
+  // Mismo rechazo que cualquier ruta sin permiso (verifyRole)
+  if (ROLES_SIN_ALEXA.includes(req.user.rol)) {
+    return res.status(403).json({ success: false, message: 'No tienes permisos para acceder a este recurso' });
+  }
+
   try {
     const usuarioId = req.user.userId;
 
@@ -401,9 +410,12 @@ router.post('/alexa/canjear-codigo', async (req, res) => {
     );
     const fila = result.rows[0];
 
+    // El rol sale de la BD al canjear: si la cuenta pasó a producción
+    // después de generar el código, tampoco se vincula
     const invalido = !fila || fila.usado
       || new Date(fila.expira_en) < new Date()
-      || !fila.activo;
+      || !fila.activo
+      || ROLES_SIN_ALEXA.includes(fila.rol);
 
     if (invalido) {
       // Respuesta genérica: no revelamos si existe, expiró o ya se usó

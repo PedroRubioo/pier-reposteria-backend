@@ -70,6 +70,14 @@ function sanitizeRequestMiddleware(req, res, next) {
       return next();
     }
 
+    // 🔧 EXCEPCIÓN: feed del inicio (publicaciones y comentarios). Igual que
+    // comandas: utils/publicaciones.js valida campo por campo, el SQL es
+    // parametrizado y React escapa al mostrar; escapar aquí guardaría
+    // "&amp;" y quitaría "$" de lo que escriben clientes y personal.
+    if (req.path === '/api/publicaciones' || req.path.startsWith('/api/publicaciones/')) {
+      return next();
+    }
+
     if (req.body) {
       req.body = sanitizeObject(req.body);
     }

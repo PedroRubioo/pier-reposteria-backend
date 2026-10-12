@@ -194,6 +194,7 @@ const recomendacionesRoutes = require('./routes/recomendacionesRoutes');
 const segmentosRoutes = require('./routes/segmentosRoutes');
 const demandaRoutes = require('./routes/demandaRoutes');
 const comandasRoutes = require('./routes/comandasRoutes');
+const publicacionesRoutes = require('./routes/publicacionesRoutes');
 
 
 
@@ -230,6 +231,7 @@ app.use('/api/recomendaciones', recomendacionesRoutes);
 app.use('/api/segmentos-clientes', segmentosRoutes);
 app.use('/api', demandaRoutes);
 app.use('/api/comandas', comandasRoutes);
+app.use('/api/publicaciones', publicacionesRoutes);
 
 
 // ========================================

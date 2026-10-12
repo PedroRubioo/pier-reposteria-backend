@@ -2,9 +2,10 @@
 //
 // Validación y normalización de lo que manda el formulario, snapshot de
 // lo que hornos y decoración necesitan saber, diff legible entre
-// versiones, semáforo y resumen de renglones (Diseno_Modulo_Comandas.md
-// §4.5 a §4.7). Todo es puro salvo validarComanda, que recibe la conexión
-// (pool o el cliente de la transacción) para leer opciones y catálogo.
+// versiones, semáforo, resumen de renglones (Diseno_Modulo_Comandas.md
+// §4.5 a §4.7) y qué dinero ve cada rol (ocultarDinero). Todo es puro
+// salvo validarComanda, que recibe la conexión (pool o el cliente de la
+// transacción) para leer opciones y catálogo.
 
 const TIPOS_OPCION = ['tamano', 'sabor', 'forma', 'decoracion'];
 const TIPO_LEGIBLE = new Map([['tamano', 'tamaño'], ['sabor', 'sabor'], ['forma', 'forma'], ['decoracion', 'decoración']]);
@@ -551,6 +552,10 @@ const CAMPOS_COBRO = [
   ['Descuento', (c) => moneda(c.descuento_centavos)],
   ['Anticipo', (c) => moneda(c.anticipo_centavos)],
 ];
+/** 'Precio de Pastel 1', 'Precio de Tart Bites': el precio de un renglón cambió */
+const PREFIJO_PRECIO = 'Precio de ';
+/** Lo que se cobró al entregar (evento 'entregada' del historial) */
+const CAMPO_SALDO_COBRADO = 'Saldo cobrado';
 
 const comoTexto = (v) => (v === null || v === undefined ? null : String(v));
 
@@ -612,7 +617,7 @@ function diffAdministrativo(antes, despues) {
   despues.items.forEach((d, i) => {
     const a = antes.items.at(i);
     if (a && mismoRenglon(a, d) && a.precio_centavos !== d.precio_centavos) {
-      cambios.push({ campo: `Precio de ${etiquetas.at(i)}`, antes: moneda(a.precio_centavos), despues: moneda(d.precio_centavos) });
+      cambios.push({ campo: `${PREFIJO_PRECIO}${etiquetas.at(i)}`, antes: moneda(a.precio_centavos), despues: moneda(d.precio_centavos) });
     }
   });
   compararCampos(cambios, CAMPOS_COBRO, antes, despues, null);
@@ -624,6 +629,67 @@ function textoCambio({ campo, antes, despues }) {
   if (campo === 'Se agregó' && antes === null) return `Se agregó: ${recortar(despues, 60)}`;
   if (campo === 'Se quitó' && despues === null) return `Se quitó: ${recortar(antes, 60)}`;
   return `${campo}: ${recortar(antes ?? '—', 60)} → ${recortar(despues ?? '—', 60)}`;
+}
+
+// ══════════════════════════════════════
+// DINERO: SOLO PARA QUIEN COBRA
+// ══════════════════════════════════════
+
+/**
+ * Hornos y decoración reciben todo lo escrito que necesitan para producir y
+ * ningún monto (decisión del dueño). Va por lista de quien SÍ ve el dinero:
+ * un rol que se agregue después al módulo no lo verá hasta sumarlo aquí.
+ */
+const VEN_DINERO = ['empleado', 'gerencia', 'direccion_general'];
+
+/** Montos del resumen de la agenda, del detalle y de cada renglón */
+const CAMPOS_MONTO = ['subtotal', 'descuento', 'total', 'anticipo', 'saldo', 'saldo_cobrado', 'precio_unitario'];
+
+/**
+ * Etiquetas fijas de los cambios de dinero: descuento y anticipo
+ * (CAMPOS_COBRO) y el saldo cobrado al entregar. El frontend repite la
+ * misma lista en esCambioDeDinero (src/comandas/componentes/presentacion.ts).
+ */
+const CAMPOS_DINERO = [...CAMPOS_COBRO.map(([etiqueta]) => etiqueta), CAMPO_SALDO_COBRADO];
+
+/** Descuento, anticipo, saldo cobrado o el precio de un renglón */
+const esCambioDeDinero = ({ campo }) => CAMPOS_DINERO.includes(campo) || campo.startsWith(PREFIJO_PRECIO);
+
+/** El mismo objeto con cada monto en null: la respuesta conserva su forma */
+const montosEnNull = (objeto) => Object.fromEntries(
+  Object.entries(objeto).map(([campo, valor]) => [campo, CAMPOS_MONTO.includes(campo) ? null : valor])
+);
+
+/**
+ * Historial (del más reciente al más antiguo) sin cambios de dinero. La
+ * edición que solo cambió dinero no subió la versión ni toca a producción:
+ * se quita completa en lugar de dejar un "Se modificó" vacío.
+ */
+function historialSinDinero(historial) {
+  return historial.flatMap((evento, i) => {
+    const anterior = historial.at(i + 1);
+    const subioVersion = anterior !== undefined && evento.version > anterior.version;
+    const cambios = evento.cambios.filter((c) => !esCambioDeDinero(c));
+    const soloDinero = evento.evento === 'modificada' && !subioVersion && evento.cambios.length > 0 && cambios.length === 0;
+    return soloDinero ? [] : [{ ...evento, cambios }];
+  });
+}
+
+/**
+ * La regla única de qué dinero ve cada rol, para el resumen de la agenda y
+ * el detalle. Quien cobra recibe la comanda tal cual; hornos y decoración,
+ * la misma forma con cada monto en null (también en los renglones) y sin
+ * cambios de dinero en el historial ni en los cambios pendientes.
+ */
+function ocultarDinero(rol, comanda) {
+  if (VEN_DINERO.includes(rol)) return comanda;
+  const oculta = montosEnNull(comanda);
+  if (Array.isArray(comanda.items)) oculta.items = comanda.items.map(montosEnNull);
+  if (Array.isArray(comanda.historial)) oculta.historial = historialSinDinero(comanda.historial);
+  if (Array.isArray(comanda.cambios_pendientes)) {
+    oculta.cambios_pendientes = comanda.cambios_pendientes.filter((c) => !esCambioDeDinero(c));
+  }
+  return oculta;
 }
 
 module.exports = {
@@ -650,4 +716,6 @@ module.exports = {
   diffProduccion,
   diffAdministrativo,
   textoCambio,
+  CAMPO_SALDO_COBRADO,
+  ocultarDinero,
 };

@@ -5,6 +5,9 @@
 // "Enterado" de hornos y decoración ligado a la versión que leyeron y
 // re-firma cuando cambia algo de producción. El contrato completo está en
 // Diseno_Modulo_Comandas.md (§4); las reglas puras, en utils/comandas.js.
+// Hornos y decoración reciben todo lo escrito y ningún monto: la agenda y
+// el detalle pasan por ocultarDinero; lo demás que les responde (catálogo,
+// Enterado y avisos de la campana) no lleva dinero.
 const express = require('express');
 const router = express.Router();
 const cloudinary = require('cloudinary').v2;
@@ -18,6 +21,7 @@ const {
   TIPOS_OPCION, TIPO_LEGIBLE, AREA_LEGIBLE, esId, aNumero, aCentavos, moneda, decimal,
   fechaLarga, horaLegible, recortar, normalizarAjustes, validarAjustes, semaforo, resumenRenglones,
   comandaDeFilas, texto, claveOpcion, validarComanda, snapshotProduccion, diffProduccion, diffAdministrativo, textoCambio,
+  CAMPO_SALDO_COBRADO, ocultarDinero,
 } = require('../utils/comandas');
 
 // ══════════════════════════════════════
@@ -593,7 +597,8 @@ router.get('/', PUEDE_VER, async (req, res) => {
       // Activas: todas (las vencidas incluidas); entregadas y canceladas: las 200 más recientes
       [hoy, estado, dias, folio, patron, estado === 'activa' ? null : 200]
     );
-    res.json({ success: true, hoy, ajustes, comandas: rows.map((f) => resumenDeFila(f, ajustes)) });
+    const comandas = rows.map((f) => ocultarDinero(req.usuario.rol, resumenDeFila(f, ajustes)));
+    res.json({ success: true, hoy, ajustes, comandas });
   } catch (error) {
     console.error('Error GET /comandas:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener las comandas' });
@@ -679,7 +684,8 @@ router.get('/:id', PUEDE_VER, async (req, res) => {
     const esCaptura = CAPTURA.includes(req.usuario.rol);
     res.json({
       success: true,
-      comanda: {
+      // Producción recibe esta misma forma con los montos en null y sin cambios de dinero
+      comanda: ocultarDinero(req.usuario.rol, {
         id: c.id,
         folio: c.folio,
         estado: c.estado,
@@ -720,7 +726,7 @@ router.get('/:id', PUEDE_VER, async (req, res) => {
           created_at: h.created_at,
         })),
         cambios_pendientes: cambiosPendientes,
-      },
+      }),
       permisos: {
         editar: editor,
         cancelar: editor,
@@ -1088,7 +1094,7 @@ router.put('/:id/entregar', PUEDE_CAPTURAR, async (req, res) => {
     await client.query(
       `INSERT INTO core.tblcomanda_historial (comanda_id, version, evento, usuario_id, cambios, snapshot)
        VALUES ($1, $2, 'entregada', $3, $4::jsonb, NULL)`,
-      [id, comanda.version, req.usuario.id, JSON.stringify([{ campo: 'Saldo cobrado', antes: null, despues: moneda(saldoCentavos) }])]
+      [id, comanda.version, req.usuario.id, JSON.stringify([{ campo: CAMPO_SALDO_COBRADO, antes: null, despues: moneda(saldoCentavos) }])]
     );
     await client.query('COMMIT');
 

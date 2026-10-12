@@ -5,6 +5,7 @@ const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { notificarConEmail, crearNotificacion } = require('../services/notificacionHelper');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 // ── Mis entregas del día (repartidor) ──
 router.get('/mis-entregas', verifyToken, verifyRole('repartidor'), async (req, res) => {
@@ -83,6 +84,8 @@ router.post('/aceptar', verifyToken, verifyRole('repartidor'), async (req, res) 
     await client.query(`UPDATE core.tblpedidos SET estado = 'asignado', updated_at = NOW() WHERE id = $1`, [pedido_id]);
     await client.query('COMMIT');
 
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Aceptó entrega', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero}`, ip: req.ip });
+
     // Avisar al cliente en el momento de la aceptación (antes solo se
     // enteraba si estaba mirando la página)
     const repData = await pool.query('SELECT nombre FROM core.tblusuarios WHERE id = $1', [req.user.userId]);
@@ -111,7 +114,7 @@ router.post('/avisar-demora', verifyToken, verifyRole('empleado', 'gerencia', 'd
     const { pedido_id } = req.body;
     if (!pedido_id) return res.status(400).json({ success: false, message: 'pedido_id es requerido' });
     const result = await pool.query(
-      `SELECT p.numero, p.usuario_id, p.tipo_entrega, p.estado, p.direccion_entrega, u.nombre, u.email
+      `SELECT p.id, p.numero, p.usuario_id, p.tipo_entrega, p.estado, p.direccion_entrega, u.nombre, u.email
        FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id WHERE p.id = $1`,
       [pedido_id]
     );
@@ -139,9 +142,8 @@ router.post('/avisar-demora', verifyToken, verifyRole('empleado', 'gerencia', 'd
         <p>Agradecemos tu paciencia. ¡Vale la pena la espera! 🧁</p>
       `,
     });
-    const { registrarAuditoria } = require('../utils/auditoria');
     const destinoDemora = p.direccion_entrega ? `${p.direccion_entrega.colonia || ''}${p.direccion_entrega.zona ? ` (${p.direccion_entrega.zona})` : ''}` : 'sin dirección';
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Avisó demora al cliente', entidad: 'pedido', entidad_id: pedido_id, detalles: `#${p.numero} · destino: ${destinoDemora}` });
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Avisó demora al cliente', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · destino: ${destinoDemora}`, ip: req.ip });
     res.json({ success: true, message: `Aviso de demora enviado al cliente del pedido #${p.numero}` });
   } catch (error) {
     console.error('Error POST /entregas/avisar-demora:', error.message);
@@ -249,6 +251,8 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
     await client.query(`UPDATE core.tblpedidos SET estado = 'asignado', updated_at = NOW() WHERE id = $1`, [pedido_id]);
     await client.query('COMMIT');
 
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Asignó repartidor', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero} → ${repartidor.nombre} ${repartidor.apellido}`, ip: req.ip });
+
     await crearNotificacion({
       usuario_id: repartidor_id,
       tipo: 'pedido',
@@ -286,11 +290,11 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
     const { estado, evidencia_url, recibio_nombre, motivo_fallo } = req.body;
 
     const transiciones = {
-      en_camino: { desde: ['asignada'], pedido: 'en_camino' },
+      en_camino: { desde: ['asignada'], pedido: 'en_camino', accion: 'Salió a entregar' },
       // 'entregada' también desde 'asignada': el repartidor que acepta
       // estando ya en la zona puede entregar directo sin "salir en camino"
-      entregada: { desde: ['asignada', 'en_camino'], pedido: 'entregado' },
-      fallida: { desde: ['asignada', 'en_camino'], pedido: 'entrega_fallida' },
+      entregada: { desde: ['asignada', 'en_camino'], pedido: 'entregado', accion: 'Entregó pedido' },
+      fallida: { desde: ['asignada', 'en_camino'], pedido: 'entrega_fallida', accion: 'Reportó entrega fallida' },
     };
     const transicion = transiciones[estado]; // eslint-disable-line security/detect-object-injection
     if (!transicion) return res.status(400).json({ success: false, message: 'Estado inválido. Valores: en_camino, entregada, fallida' });
@@ -332,6 +336,13 @@ router.put('/:id/estado', verifyToken, verifyRole('repartidor'), async (req, res
     );
     const pedido = pedidoResult.rows[0];
     await client.query('COMMIT');
+
+    // Quién recibió o por qué falló: de lo que guardó la base, no del body
+    const guardada = actualizada.rows[0];
+    let detalleEntrega = `#${pedido.numero}`;
+    if (estado === 'entregada') detalleEntrega += ` · recibió ${recortar(guardada.recibio_nombre, 80)}`;
+    else if (estado === 'fallida') detalleEntrega += ` · ${recortar(guardada.motivo_fallo, 80)}`;
+    registrarAuditoria({ usuario_id: req.user.userId, accion: transicion.accion, entidad: 'pedido', entidad_id: pedido.id, detalles: detalleEntrega, ip: req.ip });
 
     // Notificar al cliente (email solo al salir en camino, que es cuando debe estar pendiente)
     if (estado === 'en_camino') {

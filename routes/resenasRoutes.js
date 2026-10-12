@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 const PALABRAS_INAPROPIADAS = ['mierda','puta','puto','pendejo','pendeja','idiota','estupido','estúpido','cabron','cabrón','chinga','verga','culo','joder','jodido','mamada','pinche','culero','culera','baboso','babosa','imbecil','imbécil','tarado','tarada','zorra','bastardo','maldito','maldita','carajo','coño','huevon','huevón','maricon','maricón','perra','perro hijue','gonorrea','malparido','malparida','hp','hdp','wtf','ctm','ptm'];
 
@@ -188,10 +189,16 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       );
       if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
       const resena = result.rows[0];
+      // La respuesta ya quedó guardada: si el nombre no se puede leer, la
+      // bitácora y el aviso siguen sin él en vez de responder 500
+      const prodInfo = await pool.query('SELECT nombre FROM core.tblproductos WHERE id = $1', [resena.producto_id]).catch(() => ({ rows: [] }));
+      registrarAuditoria({
+        usuario_id: req.user.userId, accion: 'Respondió reseña', entidad: 'resena', entidad_id: resena.id,
+        detalles: `"${prodInfo.rows[0]?.nombre || 'un producto'}" · ${resena.rating}/5`, ip: req.ip,
+      });
       // Notificar al cliente
       try {
         const { notificarConEmail } = require('../services/notificacionHelper');
-        const prodInfo = await pool.query('SELECT nombre FROM core.tblproductos WHERE id = $1', [resena.producto_id]);
         await notificarConEmail({ usuario_id: resena.usuario_id, tipo: 'resena', titulo: 'Pier respondió a tu reseña', mensaje: `Respondimos a tu reseña del producto "${prodInfo.rows[0]?.nombre || ''}": ${respuesta_negocio.substring(0, 100)}` });
       } catch (notifErr) { console.error('Error notificación respuesta:', notifErr.message); }
       return res.json({ success: true, resena });
@@ -203,12 +210,16 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
 
-    // Notificar al autor de la reseña
-    const { crearNotificacion } = require('../services/notificacionHelper');
     const resena = result.rows[0];
     const productoData = await pool.query('SELECT nombre FROM core.tblproductos WHERE id = $1', [resena.producto_id]);
     const productoNombre = productoData.rows[0]?.nombre || 'un producto';
+    registrarAuditoria({
+      usuario_id: req.user.userId, accion: resena.estado === 'aprobada' ? 'Aprobó reseña' : 'Rechazó reseña', entidad: 'resena', entidad_id: resena.id,
+      detalles: `"${productoNombre}" · ${resena.rating}/5${resena.estado === 'rechazada' && resena.motivo_rechazo ? ` · ${recortar(resena.motivo_rechazo, 80)}` : ''}`, ip: req.ip,
+    });
 
+    // Notificar al autor de la reseña
+    const { crearNotificacion } = require('../services/notificacionHelper');
     if (respuesta_negocio) {
       await crearNotificacion({
         usuario_id: resena.usuario_id,

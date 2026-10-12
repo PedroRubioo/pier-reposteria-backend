@@ -5,7 +5,7 @@ const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { calcularRiesgo } = require('../utils/riesgoCancelacion');
-const { registrarAuditoria } = require('../utils/auditoria');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 function generarNumeroPedido() {
   const fecha = new Date();
@@ -272,7 +272,8 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
 
     // Crear notificación para el cliente
     const pedido = result.rows[0];
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Cambió estado de pedido', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero} → ${estado}` });
+    // Anterior y nuevo salen de la base (FOR UPDATE y RETURNING), no del body
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Cambió estado de pedido', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero} · ${estadoPrevio} → ${pedido.estado}`, ip: req.ip });
     const esDomicilio = pedido.tipo_entrega === 'domicilio';
     const mensajes = {
       en_preparacion: { titulo: 'Pedido en preparación', mensaje: `Tu pedido #${pedido.numero} ha comenzado a prepararse.`, tipo: 'pedido' },
@@ -366,7 +367,7 @@ router.put('/:id/aprobar', verifyToken, verifyRole('empleado', 'gerencia', 'dire
       `,
     });
 
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Aprobó pedido por confirmar', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero}` });
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Aprobó pedido por confirmar', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero}`, ip: req.ip });
     res.json({ success: true, message: `Pedido ${p.numero} aprobado; el cliente ya fue notificado` });
   } catch (error) {
     console.error('Error PUT /pedidos/:id/aprobar:', error.message);
@@ -420,7 +421,7 @@ router.put('/:id/rechazar', verifyToken, verifyRole('empleado', 'gerencia', 'dir
     );
     await client.query('COMMIT');
 
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Rechazó pedido por confirmar', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · ${String(motivo).trim().slice(0, 80)}` });
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Rechazó pedido por confirmar', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · ${recortar(String(motivo).trim(), 80)}`, ip: req.ip });
     const { notificarConEmail } = require('../services/notificacionHelper');
     const safeNumero = he.escape(String(p.numero));
     const totalTxt = parseFloat(p.total).toFixed(2);
@@ -510,7 +511,7 @@ router.put('/:id/cancelar', verifyToken, async (req, res) => {
     );
     await client.query('COMMIT');
 
-    registrarAuditoria({ usuario_id: p.usuario_id, accion: 'Cliente canceló su pedido', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · $${parseFloat(p.total).toFixed(2)}` });
+    registrarAuditoria({ usuario_id: p.usuario_id, accion: 'Cliente canceló su pedido', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · $${parseFloat(p.total).toFixed(2)}`, ip: req.ip });
     const { notificarConEmail, crearNotificacion } = require('../services/notificacionHelper');
     const safeNumero = he.escape(String(p.numero));
     const totalTxt = parseFloat(p.total).toFixed(2);

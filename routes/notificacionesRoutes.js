@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 // Mis notificaciones (cliente)
 router.get('/', verifyToken, async (req, res) => {
@@ -74,12 +75,15 @@ router.post('/enviar', verifyToken, verifyRole('empleado', 'gerencia', 'direccio
     }
 
     // Registrar envío
-    await pool.query(
+    const envioResult = await pool.query(
       `INSERT INTO core.tblnotificaciones_envios (enviado_por, tipo, titulo, mensaje, audiencia, total_enviados, estado, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,'enviada',NOW())`,
+       VALUES ($1,$2,$3,$4,$5,$6,'enviada',NOW())
+       RETURNING id, titulo, audiencia, total_enviados`,
       [req.user.userId, tipo, titulo, mensaje, audiencia, destinatarios.length]
     );
 
+    const envio = envioResult.rows[0];
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Envió notificación', entidad: 'notificacion', entidad_id: envio.id, detalles: `${envio.audiencia} · ${envio.total_enviados} destinatario${envio.total_enviados === 1 ? '' : 's'} · "${recortar(envio.titulo, 60)}"`, ip: req.ip });
     res.json({ success: true, message: `Notificación enviada a ${destinatarios.length} usuarios` });
   } catch (error) {
     console.error('Error POST /notificaciones/enviar:', error.message);

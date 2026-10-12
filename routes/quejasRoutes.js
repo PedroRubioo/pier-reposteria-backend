@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 function generarTicket() {
   return `QJ-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
@@ -65,10 +66,14 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
       [estado, respuesta || null, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Queja no encontrada' });
+    const queja = result.rows[0];
+    registrarAuditoria({
+      usuario_id: req.user.userId, accion: 'Atendió queja', entidad: 'queja', entidad_id: queja.id,
+      detalles: `${queja.ticket} → ${queja.estado}${queja.respuesta ? ` · ${recortar(queja.respuesta, 80)}` : ''}`, ip: req.ip,
+    });
 
     // Notificar al cliente
     const { crearNotificacion } = require('../services/notificacionHelper');
-    const queja = result.rows[0];
     if (queja.usuario_id) {
       const mensajes = {
         en_proceso: { titulo: 'Tu queja está siendo atendida', mensaje: `Tu queja está siendo revisada por nuestro equipo.${respuesta ? ' Respuesta: ' + respuesta.substring(0, 100) : ''}` },

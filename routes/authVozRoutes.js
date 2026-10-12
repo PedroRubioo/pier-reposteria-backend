@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria } = require('../utils/auditoria');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
 
@@ -200,7 +201,7 @@ router.put('/asignar-codigo/:usuarioId',
 
     try {
       const u = await pool.query(
-        `SELECT id, rol FROM core.tblusuarios WHERE id = $1 AND activo = TRUE`,
+        `SELECT id, rol, nombre, apellido FROM core.tblusuarios WHERE id = $1 AND activo = TRUE`,
         [usuarioId]
       );
       if (!u.rows[0]) {
@@ -226,6 +227,8 @@ router.put('/asignar-codigo/:usuarioId',
         [codigo, usuarioId]
       );
 
+      // Solo el nombre de la persona: el código jamás va a la bitácora
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Asignó código de voz', entidad: 'usuario', entidad_id: u.rows[0].id, detalles: `${u.rows[0].nombre} ${u.rows[0].apellido}`, ip: req.ip });
       return res.json({ success: true, message: 'Código asignado correctamente' });
     } catch (error) {
       console.error('Error /asignar-codigo:', error);
@@ -253,7 +256,7 @@ router.put('/asignar-pin/:usuarioId',
 
     try {
       const u = await pool.query(
-        `SELECT id, rol FROM core.tblusuarios WHERE id = $1 AND activo = TRUE`,
+        `SELECT id, rol, nombre, apellido FROM core.tblusuarios WHERE id = $1 AND activo = TRUE`,
         [usuarioId]
       );
       if (!u.rows[0]) {
@@ -278,6 +281,8 @@ router.put('/asignar-pin/:usuarioId',
         [pin_hash, usuarioId]
       );
 
+      // Solo el nombre de la persona: el PIN jamás va a la bitácora
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Asignó PIN de voz', entidad: 'usuario', entidad_id: u.rows[0].id, detalles: `${u.rows[0].nombre} ${u.rows[0].apellido}`, ip: req.ip });
       return res.json({ success: true, message: 'PIN asignado correctamente' });
     } catch (error) {
       console.error('Error /asignar-pin:', error);
@@ -295,7 +300,7 @@ router.delete('/revocar-acceso-voz/:usuarioId',
   async (req, res) => {
     const { usuarioId } = req.params;
     try {
-      await pool.query(
+      const revocado = await pool.query(
         `UPDATE core.tblusuarios
            SET codigo_empleado = NULL,
                pin_hash = NULL,
@@ -303,9 +308,15 @@ router.delete('/revocar-acceso-voz/:usuarioId',
                intentos_pin_fallidos = 0,
                pin_bloqueado_hasta = NULL,
                updated_at = NOW()
-         WHERE id = $1`,
+         WHERE id = $1
+         RETURNING id, nombre, apellido`,
         [usuarioId]
       );
+      // Sin fila no se revocó nada: no hay qué registrar
+      const persona = revocado.rows[0];
+      if (persona) {
+        registrarAuditoria({ usuario_id: req.user.userId, accion: 'Revocó acceso por voz', entidad: 'usuario', entidad_id: persona.id, detalles: `${persona.nombre} ${persona.apellido}`, ip: req.ip });
+      }
       return res.json({ success: true, message: 'Acceso por voz revocado' });
     } catch (error) {
       console.error('Error /revocar-acceso-voz:', error);

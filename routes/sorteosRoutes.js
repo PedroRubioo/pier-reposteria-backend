@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 // Listar sorteos (direcciÃ³n)
 router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
@@ -29,7 +30,9 @@ router.post('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async
       'INSERT INTO core.tblsorteos (nombre, premio, min_pedidos, created_at) VALUES ($1,$2,$3,NOW()) RETURNING *',
       [nombre, premio, min_pedidos || 0]
     );
-    res.status(201).json({ success: true, sorteo: result.rows[0] });
+    const creado = result.rows[0];
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó sorteo', entidad: 'sorteo', entidad_id: creado.id, detalles: `"${creado.nombre}" · premio: ${recortar(creado.premio, 80)}`, ip: req.ip });
+    res.status(201).json({ success: true, sorteo: creado });
   } catch (error) {
     console.error('Error POST /sorteos:', error.message);
     res.status(500).json({ success: false, message: 'Error al crear sorteo' });
@@ -63,6 +66,10 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('gerencia', 'direccion_gene
       'UPDATE core.tblsorteos SET ganador_id = $1, total_participantes = $2 WHERE id = $3',
       [ganador.id, participantes.rows.length, req.params.id]
     );
+
+    // Sorteo, ganador y participantes tal como los devolvió la base
+    const total = participantes.rows.length;
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Ejecutó sorteo', entidad: 'sorteo', entidad_id: sorteo.rows[0].id, detalles: `"${sorteo.rows[0].nombre}" · ganador: ${ganador.nombre} ${ganador.apellido} (#${ganador.id}) · ${total} participante${total === 1 ? '' : 's'}`, ip: req.ip });
 
     res.json({
       success: true,

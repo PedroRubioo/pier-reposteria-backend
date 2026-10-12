@@ -3,6 +3,14 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria } = require('../utils/auditoria');
+
+// Para la bitácora: cuántas colonias quedaron en la zona según la base
+async function contarColonias(client, zonaId) {
+  const r = await client.query('SELECT COUNT(*)::int AS total FROM core.tblzonas_colonias WHERE zona_id = $1', [zonaId]);
+  return r.rows[0].total;
+}
+const textoColonias = n => `${n} colonia${n === 1 ? '' : 's'}`;
 
 // ── Cotizar envío por colonia (público: se usa en el checkout) ──
 router.get('/cotizar', async (req, res) => {
@@ -82,7 +90,9 @@ router.post('/', verifyToken, verifyRole('direccion_general'), async (req, res) 
         }
       }
     }
+    const totalColonias = await contarColonias(client, zona.id);
     await client.query('COMMIT');
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó zona de envío', entidad: 'zona_envio', entidad_id: zona.id, detalles: `"${zona.nombre}" · $${zona.tarifa} · ${textoColonias(totalColonias)}`, ip: req.ip });
     res.status(201).json({ success: true, zona, message: `Zona "${zona.nombre}" creada` });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -100,6 +110,8 @@ router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res
   try {
     const { nombre, tarifa, activa, colonias } = req.body;
     await client.query('BEGIN');
+    // Tarifa anterior para la bitácora, con la fila bloqueada hasta el COMMIT
+    const anterior = await client.query('SELECT tarifa FROM core.tblzonas_envio WHERE id = $1 FOR UPDATE', [req.params.id]);
     const result = await client.query(`
       UPDATE core.tblzonas_envio
       SET nombre = COALESCE($1, nombre),
@@ -112,6 +124,7 @@ router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res
       await client.query('ROLLBACK');
       return res.status(404).json({ success: false, message: 'Zona no encontrada' });
     }
+    let totalColonias = null;
     if (Array.isArray(colonias)) {
       await client.query('DELETE FROM core.tblzonas_colonias WHERE zona_id = $1', [req.params.id]);
       for (const colonia of colonias) {
@@ -119,9 +132,18 @@ router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res
           await client.query('INSERT INTO core.tblzonas_colonias (zona_id, colonia) VALUES ($1, $2)', [req.params.id, colonia.trim()]);
         }
       }
+      totalColonias = await contarColonias(client, req.params.id);
     }
     await client.query('COMMIT');
-    res.json({ success: true, zona: result.rows[0], message: 'Zona actualizada' });
+
+    const zona = result.rows[0];
+    const tarifaAnterior = anterior.rows[0].tarifa;
+    let detalles = `"${zona.nombre}"`;
+    if (tarifaAnterior !== zona.tarifa) detalles += ` · tarifa $${tarifaAnterior} → $${zona.tarifa}`;
+    if (!zona.activa) detalles += ' · inactiva';
+    if (totalColonias !== null) detalles += ` · ${textoColonias(totalColonias)}`;
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Actualizó zona de envío', entidad: 'zona_envio', entidad_id: zona.id, detalles, ip: req.ip });
+    res.json({ success: true, zona, message: 'Zona actualizada' });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') {
@@ -137,6 +159,7 @@ router.delete('/:id', verifyToken, verifyRole('direccion_general'), async (req, 
   try {
     const result = await pool.query('DELETE FROM core.tblzonas_envio WHERE id = $1 RETURNING id, nombre', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Zona no encontrada' });
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Eliminó zona de envío', entidad: 'zona_envio', entidad_id: result.rows[0].id, detalles: `"${result.rows[0].nombre}"`, ip: req.ip });
     res.json({ success: true, message: `Zona "${result.rows[0].nombre}" eliminada` });
   } catch (error) {
     console.error('Error DELETE /zonas-envio/:id:', error.message);

@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { pool } = require('../config/database');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
 const GITHUB_REPO = 'PedroRubioo/pier-reposteria';
 const WORKFLOW_FILE = 'backup-neon.yml';
@@ -48,6 +49,8 @@ router.get('/download/:id', verifyToken, verifyRole('direccion_general'), async 
       headers: getGitHubHeaders(),
       responseType: 'stream'
     });
+    // Los ids de artefactos de GitHub no caben en integer: van en detalles
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Descargó respaldo', entidad: 'backup', entidad_id: null, detalles: `artefacto ${req.params.id}`, ip: req.ip });
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename=backup-${req.params.id}.zip`);
     response.data.pipe(res);
@@ -63,6 +66,7 @@ router.delete('/delete/:id', verifyToken, verifyRole('direccion_general'), async
       `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts/${req.params.id}`,
       { headers: getGitHubHeaders() }
     );
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Eliminó respaldo', entidad: 'backup', entidad_id: null, detalles: `artefacto ${req.params.id}`, ip: req.ip });
     res.json({ success: true, message: 'Backup eliminado' });
   } catch (error) {
     console.error('Error en /delete:', error.message);
@@ -80,6 +84,7 @@ router.post('/generar', verifyToken, verifyRole('direccion_general'), async (req
       { ref: 'main' },
       { headers: getGitHubHeaders() }
     );
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Generó respaldo', entidad: 'backup', entidad_id: null, detalles: 'manual', ip: req.ip });
     res.json({ success: true, message: 'Respaldo iniciado. Aparecerá en la lista en ~30 segundos.' });
   } catch (error) {
     console.error('Error en /generar:', error.message);
@@ -148,6 +153,8 @@ router.post('/backup-selectivo', verifyToken, verifyRole('direccion_general'), a
       }
       sql += `\n`;
     }
+    // La lista sale de information_schema, no del body
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Descargó respaldo selectivo', entidad: 'backup', entidad_id: null, detalles: `${tablasValidas.length} tablas: ${tablasValidas.join(', ').slice(0, 150)}`, ip: req.ip });
     res.setHeader('Content-Type', 'application/sql');
     res.setHeader('Content-Disposition', `attachment; filename=backup-selectivo-${Date.now()}.sql`);
     res.send(sql);
@@ -172,13 +179,12 @@ router.post('/restaurar', verifyToken, verifyRole('direccion_general'), async (r
       await client.query('BEGIN');
       await client.query(sql);
       await client.query('COMMIT');
-      await pool.query(
-        `INSERT INTO core.tblauditoria (accion, entidad, detalles, created_at) VALUES ('Restauracion de backup', 'sistema', $1::jsonb, NOW())`,
-        [JSON.stringify({ tipo: 'restauracion_manual', tamaño_sql: sql.length, ejecutado_por: req.user.email })]
-      );
+      // Solo el tamaño: el SQL completo jamás va a la bitácora
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Restauró respaldo', entidad: 'backup', entidad_id: null, detalles: `${sql.length} caracteres de SQL`, ip: req.ip });
       res.json({ success: true, message: 'Backup restaurado exitosamente' });
     } catch (queryError) {
       await client.query('ROLLBACK');
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Falló restauración de respaldo', entidad: 'backup', entidad_id: null, detalles: `${sql.length} caracteres de SQL · ${recortar(queryError.message, 80)}`, ip: req.ip });
       res.status(400).json({ success: false, message: `Error en SQL: ${queryError.message.substring(0, 200)}` });
     } finally {
       client.release();

@@ -63,7 +63,7 @@ router.post('/fechas-especiales', verifyToken, SOLO_DIRECCION, async (req, res) 
 
     registrarAuditoria({
       usuario_id: req.user.userId, accion: 'Marcó fechas especiales', entidad: 'fecha_especial',
-      detalles: `${limpio} · ${fechas.length} día${fechas.length > 1 ? 's' : ''}`,
+      detalles: `${limpio} · ${fechas.length} día${fechas.length > 1 ? 's' : ''}`, ip: req.ip,
     });
     res.status(201).json({ success: true, fechas: rows.map(r => ({ ...r, fecha: fechaISO(r.fecha) })), message: `${limpio} guardada` });
   } catch (error) {
@@ -83,7 +83,7 @@ router.delete('/fechas-especiales', verifyToken, SOLO_DIRECCION, async (req, res
       `DELETE FROM core.tblfechas_especiales WHERE fecha = ANY($1::date[])`, [fechas]);
     registrarAuditoria({
       usuario_id: req.user.userId, accion: 'Quitó fechas especiales', entidad: 'fecha_especial',
-      detalles: `${rowCount} día${rowCount !== 1 ? 's' : ''}`,
+      detalles: `${rowCount} día${rowCount !== 1 ? 's' : ''}`, ip: req.ip,
     });
     res.json({ success: true, eliminadas: rowCount, message: `${rowCount} día${rowCount !== 1 ? 's' : ''} sin marcar` });
   } catch (error) {

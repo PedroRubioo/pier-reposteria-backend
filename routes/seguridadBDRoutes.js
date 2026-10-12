@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { pool } = require('../config/database');
+const { registrarAuditoria } = require('../utils/auditoria');
 
 // ============================================
 // LISTAR ROLES DE BD Y SUS ATRIBUTOS
@@ -119,16 +120,19 @@ router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), asyn
 
     const permitido = testResult.rows[0].permitido;
 
-    await pool.query(
-      `INSERT INTO core.tblauditoria (accion, entidad, detalles, created_at) 
-       VALUES ('Prueba de acceso BD', 'seguridad', $1::jsonb, NOW())`,
-      [JSON.stringify({
+    // El objeto se conserva tal cual: /historial lee sus campos
+    registrarAuditoria({
+      usuario_id: req.user.userId,
+      accion: 'Prueba de acceso BD',
+      entidad: 'seguridad',
+      detalles: {
         rol, operacion,
         tabla: `core.${tabla}`,
         resultado: permitido ? 'PERMITIDO' : 'DENEGADO',
         ejecutado_por: req.user.email
-      })]
-    );
+      },
+      ip: req.ip
+    });
 
     res.json({
       success: true,

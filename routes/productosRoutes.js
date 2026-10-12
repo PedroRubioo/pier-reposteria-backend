@@ -211,8 +211,8 @@ router.get('/productos-destacados', async (req, res) => {
 });
 
 // Actualizar populares: productos con 7+ compras desde el lunes de esta semana
-// Se reinicia cada semana (lunes a sábado)
-router.post('/actualizar-populares', async (req, res) => {
+// Se reinicia cada semana (lunes a sábado). Solo el personal: reescribe el catálogo
+router.post('/actualizar-populares', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     // Calcular inicio de semana (domingo)
     const ahora = new Date();
@@ -239,10 +239,13 @@ router.post('/actualizar-populares', async (req, res) => {
     await pool.query('UPDATE core.tblproductos SET popular = false, updated_at = NOW() WHERE popular = true');
 
     // Marcar como populares los que tienen 7+ compras
+    let marcados = 0;
     if (topIds.length > 0) {
-      await pool.query(`UPDATE core.tblproductos SET popular = true, updated_at = NOW() WHERE id = ANY($1)`, [topIds]);
+      const marcado = await pool.query(`UPDATE core.tblproductos SET popular = true, updated_at = NOW() WHERE id = ANY($1)`, [topIds]);
+      marcados = marcado.rowCount;
     }
 
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Recalculó productos populares', entidad: 'producto', entidad_id: null, detalles: `${marcados} populares`, ip: req.ip });
     res.json({
       success: true,
       message: `${topIds.length} productos populares (7+ compras desde domingo ${inicioSemana.toLocaleDateString('es-MX')})`,
@@ -301,8 +304,9 @@ router.post('/productos', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       enviado_por: req.user.userId
     });
 
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó producto', entidad: 'producto', entidad_id: result.rows[0].id, detalles: `"${nombre}" desde $${precio_chico}` });
-    res.status(201).json({ success: true, producto: result.rows[0] });
+    const producto = result.rows[0];
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó producto', entidad: 'producto', entidad_id: producto.id, detalles: `"${producto.nombre}" · $${producto.precio_chico}`, ip: req.ip });
+    res.status(201).json({ success: true, producto });
   } catch (error) {
     console.error('Error POST /productos:', error.message);
     res.status(500).json({ success: false, message: 'Error al crear producto' });
@@ -313,6 +317,9 @@ router.put('/productos/:id', verifyToken, verifyRole('empleado', 'gerencia', 'di
   try {
     const { id } = req.params;
     const { nombre, descripcion, categoria_id, precio_chico, precio_grande, imagen_url, imagen_public_id, imagenes, ingredientes, sabor, tamano, tipo, popular, es_nuevo, stock_online, activo } = req.body;
+    // Stock previo: la bitácora solo lo menciona si cambió
+    // (el formulario de edición manda el stock aunque no se toque)
+    const previa = await pool.query('SELECT stock_online FROM core.tblproductos WHERE id = $1', [id]);
     const result = await pool.query(`
       UPDATE core.tblproductos SET
         nombre = COALESCE($1, nombre), descripcion = COALESCE($2, descripcion), categoria_id = COALESCE($3, categoria_id),
@@ -324,11 +331,12 @@ router.put('/productos/:id', verifyToken, verifyRole('empleado', 'gerencia', 'di
       WHERE id = $17 RETURNING *
     `, [nombre, descripcion, categoria_id, precio_chico, precio_grande, imagen_url, imagen_public_id, imagenes ? JSON.stringify(imagenes) : null, ingredientes, sabor, tamano, tipo, popular, es_nuevo, stock_online, activo, id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
-    registrarAuditoria({
-      usuario_id: req.user.userId, accion: 'Actualizó producto', entidad: 'producto', entidad_id: result.rows[0].id,
-      detalles: `"${result.rows[0].nombre}"${stock_online !== undefined && stock_online !== null ? ` · stock a ${stock_online}` : ''}${activo === false ? ' · desactivado' : ''}`,
-    });
-    res.json({ success: true, producto: result.rows[0] });
+    const producto = result.rows[0];
+    let detalles = `"${producto.nombre}"`;
+    if (previa.rows[0]?.stock_online !== producto.stock_online) detalles += ` · stock ${producto.stock_online}`;
+    if (!producto.activo) detalles += ' · inactivo';
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Actualizó producto', entidad: 'producto', entidad_id: producto.id, detalles, ip: req.ip });
+    res.json({ success: true, producto });
   } catch (error) {
     console.error('Error PUT /productos/:id:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar producto' });
@@ -339,7 +347,7 @@ router.delete('/productos/:id', verifyToken, verifyRole('empleado', 'gerencia', 
   try {
     const result = await pool.query('UPDATE core.tblproductos SET activo = false, updated_at = NOW() WHERE id = $1 RETURNING id, nombre', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrado' });
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Desactivó producto', entidad: 'producto', entidad_id: result.rows[0].id, detalles: `"${result.rows[0].nombre}"` });
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Desactivó producto', entidad: 'producto', entidad_id: result.rows[0].id, detalles: `"${result.rows[0].nombre}"`, ip: req.ip });
     res.json({ success: true, message: `"${result.rows[0].nombre}" desactivado` });
   } catch (error) {
     console.error('Error DELETE /productos/:id:', error.message);
@@ -356,6 +364,7 @@ router.post('/categorias', verifyToken, verifyRole('empleado', 'gerencia', 'dire
       INSERT INTO core.tblcategorias (nombre, descripcion, imagen_url, imagen_public_id, orden, activo, created_at, updated_at)
       VALUES ($1,$2,$3,$4,$5,true,NOW(),NOW()) RETURNING *
     `, [nombre, descripcion || null, imagen_url || null, imagen_public_id || null, orden || 0]);
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó categoría', entidad: 'categoria', entidad_id: result.rows[0].id, detalles: `"${result.rows[0].nombre}"`, ip: req.ip });
     res.status(201).json({ success: true, categoria: result.rows[0] });
   } catch (error) {
     console.error('Error POST /categorias:', error.message);
@@ -366,9 +375,12 @@ router.post('/categorias', verifyToken, verifyRole('empleado', 'gerencia', 'dire
 router.put('/categorias/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { nombre, descripcion, imagen_url, imagen_public_id, orden, activo } = req.body;
+    // Estado previo: la bitácora distingue activar o desactivar de una edición
+    // (el formulario de edición manda "activo" aunque no cambie)
+    const previa = await pool.query('SELECT activo FROM core.tblcategorias WHERE id = $1', [req.params.id]);
     const result = await pool.query(`
-      UPDATE core.tblcategorias SET 
-        nombre = COALESCE($1, nombre), 
+      UPDATE core.tblcategorias SET
+        nombre = COALESCE($1, nombre),
         descripcion = COALESCE($2, descripcion),
         imagen_url = COALESCE($3, imagen_url), 
         imagen_public_id = COALESCE($4, imagen_public_id),
@@ -378,7 +390,11 @@ router.put('/categorias/:id', verifyToken, verifyRole('empleado', 'gerencia', 'd
       WHERE id = $7 RETURNING *
     `, [nombre || null, descripcion || null, imagen_url || null, imagen_public_id || null, orden != null ? orden : null, activo != null ? String(activo) : null, req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
-    res.json({ success: true, categoria: result.rows[0] });
+    const categoria = result.rows[0];
+    let accion = 'Actualizó categoría';
+    if (previa.rows[0]?.activo !== categoria.activo) accion = categoria.activo ? 'Reactivó categoría' : 'Desactivó categoría';
+    registrarAuditoria({ usuario_id: req.user.userId, accion, entidad: 'categoria', entidad_id: categoria.id, detalles: `"${categoria.nombre}"`, ip: req.ip });
+    res.json({ success: true, categoria });
   } catch (error) {
     console.error('Error PUT /categorias/:id:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar categoría' });
@@ -408,10 +424,12 @@ router.post('/categoria-opciones', verifyToken, verifyRole('empleado', 'gerencia
     if (!categoria_id || !tipo_opcion || !nombre) return res.status(400).json({ success: false, message: 'Todos los campos son requeridos' });
     if (!['tipo', 'sabor'].includes(tipo_opcion)) return res.status(400).json({ success: false, message: 'tipo_opcion debe ser "tipo" o "sabor"' });
     const result = await pool.query(
-      'INSERT INTO core.tblcategoria_opciones (categoria_id, tipo_opcion, nombre) VALUES ($1, $2, $3) RETURNING id, nombre',
+      'INSERT INTO core.tblcategoria_opciones (categoria_id, tipo_opcion, nombre) VALUES ($1, $2, $3) RETURNING id, tipo_opcion, nombre',
       [categoria_id, tipo_opcion, nombre.trim()]
     );
-    res.status(201).json({ success: true, opcion: result.rows[0] });
+    const opcion = result.rows[0];
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Agregó opción de categoría', entidad: 'categoria_opcion', entidad_id: opcion.id, detalles: `${opcion.tipo_opcion}: "${opcion.nombre}"`, ip: req.ip });
+    res.status(201).json({ success: true, opcion: { id: opcion.id, nombre: opcion.nombre } });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ success: false, message: 'Esta opción ya existe para esta categoría' });
     console.error('Error POST /categoria-opciones:', error.message);
@@ -423,11 +441,18 @@ router.put('/categoria-opciones/:id', verifyToken, verifyRole('empleado', 'geren
   try {
     const { nombre } = req.body;
     if (!nombre) return res.status(400).json({ success: false, message: 'Nombre es requerido' });
+    // Nombre previo para la bitácora ("a" → "b")
+    const previa = await pool.query('SELECT tipo_opcion, nombre FROM core.tblcategoria_opciones WHERE id = $1', [req.params.id]);
     const result = await pool.query(
       'UPDATE core.tblcategoria_opciones SET nombre = $1 WHERE id = $2 RETURNING id, nombre',
       [nombre.trim(), req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Opción no encontrada' });
+    const antes = previa.rows[0];
+    // Guardar el mismo nombre no es un cambio: la bitácora no registra "a" → "a"
+    if (antes && antes.nombre !== result.rows[0].nombre) {
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Renombró opción de categoría', entidad: 'categoria_opcion', entidad_id: result.rows[0].id, detalles: `${antes.tipo_opcion}: "${antes.nombre}" → "${result.rows[0].nombre}"`, ip: req.ip });
+    }
     res.json({ success: true, opcion: result.rows[0] });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ success: false, message: 'Ya existe una opción con ese nombre' });
@@ -438,8 +463,10 @@ router.put('/categoria-opciones/:id', verifyToken, verifyRole('empleado', 'geren
 
 router.delete('/categoria-opciones/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM core.tblcategoria_opciones WHERE id = $1 RETURNING id', [req.params.id]);
+    const result = await pool.query('DELETE FROM core.tblcategoria_opciones WHERE id = $1 RETURNING id, tipo_opcion, nombre', [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Opción no encontrada' });
+    const opcion = result.rows[0];
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Eliminó opción de categoría', entidad: 'categoria_opcion', entidad_id: opcion.id, detalles: `${opcion.tipo_opcion}: "${opcion.nombre}"`, ip: req.ip });
     res.json({ success: true, message: 'Opción eliminada' });
   } catch (error) {
     console.error('Error DELETE /categoria-opciones:', error.message);

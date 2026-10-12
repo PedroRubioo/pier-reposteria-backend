@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { pool } = require('../config/database');
+const { registrarAuditoria } = require('../utils/auditoria');
 
 // ============================================
 // RESUMEN GENERAL DE RENDIMIENTO
@@ -241,16 +242,18 @@ router.post('/explain', verifyToken, verifyRole('direccion_general'), async (req
     const plan = explainResult.rows[0]['QUERY PLAN'][0];
 
     // Registrar en auditoría
-    await pool.query(
-      `INSERT INTO core.tblauditoria (accion, entidad, detalles, created_at) 
-       VALUES ('EXPLAIN ANALYZE', 'monitoreo', $1::jsonb, NOW())`,
-      [JSON.stringify({
+    registrarAuditoria({
+      usuario_id: req.user.userId,
+      accion: 'EXPLAIN ANALYZE',
+      entidad: 'monitoreo',
+      detalles: {
         query: userQuery.substring(0, 300),
         tiempo_planificacion: plan['Planning Time'],
         tiempo_ejecucion: plan['Execution Time'],
         ejecutado_por: req.user.email
-      })]
-    );
+      },
+      ip: req.ip
+    });
 
     res.json({
       success: true,
@@ -407,14 +410,16 @@ router.post('/vacuum', verifyToken, verifyRole('direccion_general'), async (req,
     }
 
     // Registrar en auditoría
-    await pool.query(
-      `INSERT INTO core.tblauditoria (accion, entidad, detalles, created_at) 
-       VALUES ('VACUUM ANALYZE', 'monitoreo', $1::jsonb, NOW())`,
-      [JSON.stringify({
+    registrarAuditoria({
+      usuario_id: req.user.userId,
+      accion: 'VACUUM ANALYZE',
+      entidad: 'monitoreo',
+      detalles: {
         tabla: tabla || 'TODAS',
         ejecutado_por: req.user.email
-      })]
-    );
+      },
+      ip: req.ip
+    });
 
     res.json({
       success: true,
@@ -453,14 +458,16 @@ router.post('/analyze', verifyToken, verifyRole('direccion_general'), async (req
       }
     }
 
-    await pool.query(
-      `INSERT INTO core.tblauditoria (accion, entidad, detalles, created_at) 
-       VALUES ('ANALYZE', 'monitoreo', $1::jsonb, NOW())`,
-      [JSON.stringify({
+    registrarAuditoria({
+      usuario_id: req.user.userId,
+      accion: 'ANALYZE',
+      entidad: 'monitoreo',
+      detalles: {
         tabla: tabla || 'TODAS',
         ejecutado_por: req.user.email
-      })]
-    );
+      },
+      ip: req.ip
+    });
 
     res.json({
       success: true,

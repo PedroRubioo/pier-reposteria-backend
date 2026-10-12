@@ -3,6 +3,24 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria } = require('../utils/auditoria');
+
+// Bitácora: '"<título o nombre>" · <tipo> · <descuento>%' con lo que guardó la
+// base. Sin título de banner ni nombre de temporada, se nombra por su producto.
+// Nunca lanza: se llama con el cambio ya hecho, y si la consulta del nombre
+// falla el detalle sale sin él en vez de convertir la respuesta en 500
+async function detallePromocion(promo) {
+  let nombre = promo.titulo_banner || promo.nombre_temporada;
+  if (!nombre && promo.producto_id) {
+    const producto = await pool.query('SELECT nombre FROM core.tblproductos WHERE id = $1', [promo.producto_id]).catch(() => null);
+    nombre = producto?.rows[0]?.nombre;
+  }
+  const partes = [];
+  if (nombre) partes.push(`"${nombre}"`);
+  partes.push(promo.tipo);
+  if (promo.descuento_porcentaje !== null) partes.push(`${Number(promo.descuento_porcentaje)}%`);
+  return partes.join(' · ');
+}
 
 // Promociones activas (público)
 router.get('/activas', async (req, res) => {
@@ -82,8 +100,8 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
       }
     }
 
-    const { registrarAuditoria } = require('../utils/auditoria');
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó promoción', entidad: 'promocion', entidad_id: result.rows[0].id, detalles: `${tipo}${descuento_porcentaje ? ` · ${descuento_porcentaje}% OFF` : ''}${nombre_temporada ? ` · ${nombre_temporada}` : ''}` });
+    const detalles = await detallePromocion(result.rows[0]);
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó promoción', entidad: 'promocion', entidad_id: result.rows[0].id, detalles, ip: req.ip });
     res.status(201).json({ success: true, promocion: result.rows[0] });
   } catch (error) {
     console.error('Error POST /promociones:', error.message);
@@ -104,9 +122,12 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
       [tipo, producto_id, estado, descuento_porcentaje, precio_original, precio_oferta, fecha_inicio, fecha_fin, nombre_temporada, badge_destacado, titulo_banner, subtitulo_banner, descripcion_banner, codigo_descuento, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
-    const { registrarAuditoria } = require('../utils/auditoria');
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Actualizó promoción', entidad: 'promocion', entidad_id: result.rows[0].id, detalles: `${result.rows[0].tipo}${estado ? ` · estado: ${estado}` : ''}` });
-    res.json({ success: true, promocion: result.rows[0] });
+    const promo = result.rows[0];
+    // El botón de pausar/activar solo manda el estado: la bitácora lo muestra
+    let detalles = await detallePromocion(promo);
+    if (estado) detalles += ` · estado: ${promo.estado}`;
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Actualizó promoción', entidad: 'promocion', entidad_id: promo.id, detalles, ip: req.ip });
+    res.json({ success: true, promocion: promo });
   } catch (error) {
     console.error('Error PUT /promociones/:id:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar promoción' });
@@ -116,10 +137,13 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
 // Eliminar promoción
 router.delete('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM core.tblpromociones WHERE id = $1 RETURNING id', [req.params.id]);
+    const result = await pool.query(
+      'DELETE FROM core.tblpromociones WHERE id = $1 RETURNING id, tipo, producto_id, descuento_porcentaje, nombre_temporada, titulo_banner',
+      [req.params.id]
+    );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
-    const { registrarAuditoria } = require('../utils/auditoria');
-    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Eliminó promoción', entidad: 'promocion', entidad_id: result.rows[0].id });
+    const detalles = await detallePromocion(result.rows[0]);
+    registrarAuditoria({ usuario_id: req.user.userId, accion: 'Eliminó promoción', entidad: 'promocion', entidad_id: result.rows[0].id, detalles, ip: req.ip });
     res.json({ success: true, message: 'Promoción eliminada' });
   } catch (error) {
     console.error('Error DELETE /promociones/:id:', error.message);

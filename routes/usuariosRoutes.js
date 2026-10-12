@@ -91,7 +91,7 @@ router.put('/:id/rol', verifyToken, verifyRole('direccion_general'), async (req,
     await client.query('COMMIT');
 
     if (cambia) {
-      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Cambió rol de usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol} → ${rol}` });
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Cambió rol de usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol} → ${rol}`, ip: req.ip });
     }
     res.json({ success: true, usuario: { id, nombre: usuario.nombre, apellido: usuario.apellido, rol }, message: `Rol cambiado a ${rol}` });
   } catch (error) {
@@ -133,7 +133,7 @@ router.put('/:id/estado', verifyToken, verifyRole('gerencia', 'direccion_general
     await client.query('COMMIT');
 
     if (cambia) {
-      registrarAuditoria({ usuario_id: req.user.userId, accion: activo ? 'Reactivó usuario' : 'Desactivó usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol}` });
+      registrarAuditoria({ usuario_id: req.user.userId, accion: activo ? 'Reactivó usuario' : 'Desactivó usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol}`, ip: req.ip });
     }
     res.json({ success: true, usuario: { id, nombre: usuario.nombre, activo }, message: activo ? 'Usuario activado' : 'Usuario desactivado' });
   } catch (error) {

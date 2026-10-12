@@ -4,6 +4,15 @@ const router = express.Router();
 const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
+
+// Bitácora: la acción depende del estado al que pasa el reembolso
+const ACCION_REEMBOLSO = new Map([
+  ['en_revision', 'Pasó reembolso a revisión'],
+  ['aprobado', 'Aprobó reembolso'],
+  ['rechazado', 'Rechazó reembolso'],
+  ['procesado', 'Procesó reembolso'],
+]);
 
 // Solicitar reembolso (cliente)
 router.post('/', verifyToken, async (req, res) => {
@@ -88,9 +97,15 @@ router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_ge
     const result = await pool.query(query, params);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Reembolso no encontrado' });
 
-    // Crear notificación para el cliente
     const reembolso = result.rows[0];
     const pedidoInfo = await pool.query('SELECT usuario_id, numero FROM core.tblpedidos WHERE id = $1', [reembolso.pedido_id]);
+    registrarAuditoria({
+      usuario_id: req.user.userId, accion: ACCION_REEMBOLSO.get(reembolso.estado), entidad: 'reembolso', entidad_id: reembolso.id,
+      detalles: `#${pedidoInfo.rows[0]?.numero} · $${parseFloat(reembolso.monto).toFixed(2)}${reembolso.estado === 'rechazado' && reembolso.justificacion_rechazo ? ` · ${recortar(reembolso.justificacion_rechazo, 80)}` : ''}`,
+      ip: req.ip,
+    });
+
+    // Crear notificación para el cliente
     if (pedidoInfo.rows.length > 0) {
       const clienteId = pedidoInfo.rows[0].usuario_id;
       const pedidoNumero = pedidoInfo.rows[0].numero;

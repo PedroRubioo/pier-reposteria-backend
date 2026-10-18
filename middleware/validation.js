@@ -78,6 +78,13 @@ function sanitizeRequestMiddleware(req, res, next) {
       return next();
     }
 
+    // 🔧 EXCEPCIÓN: Editor del sitio. utils/contenidoSitio.js valida campo
+    // por campo, el SQL es parametrizado y React escapa al pintar; escapar
+    // aquí guardaría "O&#x27;Brien" y quitaría "$", "{}" y "[]" de los textos.
+    if (req.path === '/api/contenido' || req.path.startsWith('/api/contenido/')) {
+      return next();
+    }
+
     if (req.body) {
       req.body = sanitizeObject(req.body);
     }

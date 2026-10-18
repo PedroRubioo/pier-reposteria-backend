@@ -11,9 +11,14 @@ const { registrarAuditoria } = require('../utils/auditoria');
 
 const MSG_ULTIMA_DIRECCION = 'Debe quedar al menos una cuenta de Dirección General activa';
 
-// Alta y edición de personal: solo Dirección General, con el rol leído de la base
+// Permisos con el rol leído de la base (no del JWT): una cuenta degradada o
+// desactivada no administra personal con su token viejo
 const SOLO_DIRECCION = accesoVigente(['direccion_general']);
+const GERENCIA_O_DIRECCION = accesoVigente(['gerencia', 'direccion_general']);
 const ROLES_PERSONAL = ['empleado', 'gerencia', 'repartidor', 'hornos', 'decoracion', 'direccion_general'];
+// Gerencia administra al personal operativo; las cuentas de Gerencia y de
+// Dirección General solo las toca Dirección General (Diseno_Panel_Personal.md §4.8)
+const ROLES_OPERATIVOS = ['empleado', 'repartidor', 'hornos', 'decoracion'];
 const MAX_PUESTO = 100;
 
 // Contraseña temporal de 12 caracteres sin los que se confunden (0/O, 1/l/I)
@@ -88,8 +93,9 @@ router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async 
 
 // Dar de alta a una persona del equipo (Diseno_Panel_Direccion.md §4.4).
 // La cuenta nace activa y con el correo verificado; la contraseña temporal
-// se devuelve una sola vez y en la base solo queda su hash.
-router.post('/', SOLO_DIRECCION, async (req, res) => {
+// se devuelve una sola vez y en la base solo queda su hash. Gerencia solo da
+// de alta a personal operativo.
+router.post('/', GERENCIA_O_DIRECCION, async (req, res) => {
   try {
     const { nombre, apellido, email, rol } = req.body;
     const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
@@ -101,6 +107,9 @@ router.post('/', SOLO_DIRECCION, async (req, res) => {
     if (!isValidName(apellidoLimpio)) return res.status(400).json({ success: false, message: 'El apellido debe tener entre 2 y 50 letras' });
     if (!correo || correo.length > 255 || !isValidEmail(correo)) return res.status(400).json({ success: false, message: 'El correo no es válido' });
     if (!ROLES_PERSONAL.includes(rol)) return res.status(400).json({ success: false, message: `Rol inválido. Valores: ${ROLES_PERSONAL.join(', ')}` });
+    if (req.usuario.rol === 'gerencia' && !ROLES_OPERATIVOS.includes(rol)) {
+      return res.status(403).json({ success: false, message: 'Gerencia solo puede dar de alta a empleados, repartidores, hornos y decoración' });
+    }
     if (puesto === undefined) return res.status(400).json({ success: false, message: `El puesto debe ser un texto de hasta ${MAX_PUESTO} caracteres` });
     if (telefono === undefined) return res.status(400).json({ success: false, message: 'El teléfono debe tener exactamente 10 dígitos' });
 
@@ -127,8 +136,9 @@ router.post('/', SOLO_DIRECCION, async (req, res) => {
 });
 
 // Editar puesto y teléfono de una persona del equipo. Solo cambia lo que
-// viene en el cuerpo; null o "" lo dejan vacío.
-router.put('/:id', SOLO_DIRECCION, async (req, res) => {
+// viene en el cuerpo; null o "" lo dejan vacío. Gerencia, solo del personal
+// operativo.
+router.put('/:id', GERENCIA_O_DIRECCION, async (req, res) => {
   try {
     const id = idDeRuta(req.params.id);
     if (!id) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
@@ -144,6 +154,9 @@ router.put('/:id', SOLO_DIRECCION, async (req, res) => {
     const antes = previo.rows[0];
     if (!antes) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
     if (antes.rol === 'cliente') return res.status(400).json({ success: false, message: 'Solo se edita el puesto y el teléfono de las personas del equipo' });
+    if (req.usuario.rol === 'gerencia' && !ROLES_OPERATIVOS.includes(antes.rol)) {
+      return res.status(403).json({ success: false, message: 'Solo Dirección General puede editar cuentas de Gerencia o Dirección General' });
+    }
 
     const cambios = [];
     if (traePuesto && puesto !== antes.puesto) cambios.push(`puesto: ${antes.puesto || 'sin puesto'} → ${puesto || 'sin puesto'}`);
@@ -168,15 +181,20 @@ router.put('/:id', SOLO_DIRECCION, async (req, res) => {
   }
 });
 
-// Detalle de usuario
-router.get('/:id', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
+// Detalle de usuario. La propia cuenta la lee cualquiera con sesión (Mi
+// cuenta y «Mi acceso por voz»); la de otra persona, gerencia o dirección
+const DETALLE_AJENO = verifyRole('gerencia', 'direccion_general');
+const propiaOGerencia = (req, res, next) => (idDeRuta(req.params.id) === Number(req.user.userId) ? next() : DETALLE_AJENO(req, res, next));
+router.get('/:id', verifyToken, propiaOGerencia, async (req, res) => {
   try {
+    const id = idDeRuta(req.params.id);
+    if (!id) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
     const result = await pool.query(
       `SELECT id, nombre, apellido, email, telefono, rol, activo, email_verificado, avatar_url, puesto, permisos, google_id, created_at, updated_at, ultimo_acceso,
               codigo_empleado, intentos_pin_fallidos, pin_bloqueado_hasta, pin_actualizado_at,
               (pin_hash IS NOT NULL) AS tiene_pin
          FROM core.tblusuarios WHERE id = $1`,
-      [req.params.id]
+      [id]
     );
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
     res.json({ success: true, usuario: result.rows[0] });
@@ -186,8 +204,9 @@ router.get('/:id', verifyToken, verifyRole('gerencia', 'direccion_general'), asy
   }
 });
 
-// Cambiar rol
-router.put('/:id/rol', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+// Cambiar rol (solo Dirección General vigente: una cuenta de dirección
+// degradada no sube a otras con su token viejo)
+router.put('/:id/rol', SOLO_DIRECCION, async (req, res) => {
   let client;
   try {
     const { rol } = req.body;
@@ -195,7 +214,7 @@ router.put('/:id/rol', verifyToken, verifyRole('direccion_general'), async (req,
     if (!validos.includes(rol)) return res.status(400).json({ success: false, message: `Rol inválido. Valores: ${validos.join(', ')}` });
     const id = idDeRuta(req.params.id);
     if (!id) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
-    if (id === req.user.userId) return res.status(400).json({ success: false, message: 'No puedes cambiar tu propio rol' });
+    if (id === req.usuario.id) return res.status(400).json({ success: false, message: 'No puedes cambiar tu propio rol' });
 
     client = await pool.connect();
     await client.query('BEGIN');
@@ -211,7 +230,7 @@ router.put('/:id/rol', verifyToken, verifyRole('direccion_general'), async (req,
     await client.query('COMMIT');
 
     if (cambia) {
-      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Cambió rol de usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol} → ${rol}`, ip: req.ip });
+      registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Cambió rol de usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol} → ${rol}`, ip: req.ip });
     }
     res.json({ success: true, usuario: { id, nombre: usuario.nombre, apellido: usuario.apellido, rol }, message: `Rol cambiado a ${rol}` });
   } catch (error) {
@@ -223,8 +242,9 @@ router.put('/:id/rol', verifyToken, verifyRole('direccion_general'), async (req,
   }
 });
 
-// Activar/desactivar usuario
-router.put('/:id/estado', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
+// Activar/desactivar usuario (rol leído de la base: un gerente degradado ya
+// no administra personal con su token viejo)
+router.put('/:id/estado', GERENCIA_O_DIRECCION, async (req, res) => {
   let client;
   try {
     const { activo } = req.body;
@@ -233,14 +253,14 @@ router.put('/:id/estado', verifyToken, verifyRole('gerencia', 'direccion_general
     if (!id) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
     // También se bloquea reactivarse: solo podría hacerlo alguien ya dado de
     // baja usando un token emitido antes de la baja
-    if (id === req.user.userId) return res.status(400).json({ success: false, message: 'No puedes cambiar el estado de tu propia cuenta' });
+    if (id === req.usuario.id) return res.status(400).json({ success: false, message: 'No puedes cambiar el estado de tu propia cuenta' });
 
     client = await pool.connect();
     await client.query('BEGIN');
     const { usuario, otrasDirecciones } = await bloquearCuenta(client, id);
     if (!usuario) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Usuario no encontrado' }); }
     // Gerencia administra al personal, no a sus pares ni a Dirección
-    if (req.user.rol === 'gerencia' && ['gerencia', 'direccion_general'].includes(usuario.rol)) {
+    if (req.usuario.rol === 'gerencia' && ['gerencia', 'direccion_general'].includes(usuario.rol)) {
       await client.query('ROLLBACK');
       return res.status(403).json({ success: false, message: 'Solo Dirección General puede activar o desactivar cuentas de Gerencia o Dirección General' });
     }
@@ -253,7 +273,7 @@ router.put('/:id/estado', verifyToken, verifyRole('gerencia', 'direccion_general
     await client.query('COMMIT');
 
     if (cambia) {
-      registrarAuditoria({ usuario_id: req.user.userId, accion: activo ? 'Reactivó usuario' : 'Desactivó usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol}`, ip: req.ip });
+      registrarAuditoria({ usuario_id: req.usuario.id, accion: activo ? 'Reactivó usuario' : 'Desactivó usuario', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol}`, ip: req.ip });
     }
     res.json({ success: true, usuario: { id, nombre: usuario.nombre, activo }, message: activo ? 'Usuario activado' : 'Usuario desactivado' });
   } catch (error) {
@@ -262,6 +282,41 @@ router.put('/:id/estado', verifyToken, verifyRole('gerencia', 'direccion_general
     res.status(500).json({ success: false, message: 'Error al cambiar estado' });
   } finally {
     if (client) client.release();
+  }
+});
+
+// Restablecer la contraseña de una persona del equipo
+// (Diseno_Panel_Personal.md §4.8): se genera una temporal, la anterior deja
+// de servir y la nueva se muestra una sola vez (en la base solo queda su
+// hash). Las sesiones abiertas siguen hasta que expiren.
+router.post('/:id/contrasena-temporal', GERENCIA_O_DIRECCION, async (req, res) => {
+  try {
+    const id = idDeRuta(req.params.id);
+    if (!id) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    if (id === req.usuario.id) return res.status(400).json({ success: false, message: 'Para cambiar tu propia contraseña usa “¿Olvidaste tu contraseña?”' });
+
+    const previo = await pool.query('SELECT id, nombre, apellido, email, rol::text AS rol, activo FROM core.tblusuarios WHERE id = $1', [id]);
+    const usuario = previo.rows[0];
+    if (!usuario) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    if (usuario.rol === 'cliente') return res.status(400).json({ success: false, message: 'Solo se restablece la contraseña del personal' });
+    if (req.usuario.rol === 'gerencia' && !ROLES_OPERATIVOS.includes(usuario.rol)) {
+      return res.status(403).json({ success: false, message: 'Solo Dirección General puede restablecer la contraseña de Gerencia o Dirección General' });
+    }
+    if (!usuario.activo) return res.status(400).json({ success: false, message: 'Activa la cuenta antes de restablecer su contraseña' });
+
+    const contrasena = contrasenaTemporal();
+    const passwordHash = await Usuario.hashPassword(contrasena);
+    await pool.query('UPDATE core.tblusuarios SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, id]);
+    registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Restableció contraseña de personal', entidad: 'usuario', entidad_id: id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol}`, ip: req.ip });
+    res.json({
+      success: true,
+      usuario: { id: usuario.id, nombre: usuario.nombre, apellido: usuario.apellido, email: usuario.email, rol: usuario.rol },
+      contrasena_temporal: contrasena,
+      message: 'Contraseña restablecida. Compártela: no se volverá a mostrar.',
+    });
+  } catch (error) {
+    console.error('Error POST /usuarios/:id/contrasena-temporal:', error.message);
+    res.status(500).json({ success: false, message: 'Error al restablecer la contraseña' });
   }
 });
 

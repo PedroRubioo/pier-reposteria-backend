@@ -22,6 +22,19 @@ async function detallePromocion(promo) {
   return partes.join(' · ');
 }
 
+// Candado (Diseno_Panel_Personal.md §4.12): un producto no puede tener dos
+// promociones activas, porque el carrito y el cobro duplican el renglón.
+// Devuelve la otra promoción activa vigente del producto, o null
+async function otraPromocionActiva(productoId, excluirId) {
+  const { rows } = await pool.query(
+    `SELECT id, tipo FROM core.tblpromociones
+      WHERE producto_id = $1 AND estado = 'activa' AND (fecha_fin IS NULL OR fecha_fin > NOW()) AND id <> $2 LIMIT 1`,
+    [productoId, excluirId]
+  );
+  return rows[0] || null;
+}
+const mensajeCandado = (tipo) => `Ese producto ya tiene una promoción activa (${tipo}). Páusala o termínala antes de activar otra: dos a la vez duplican el cobro en el carrito.`;
+
 // Promociones activas (público)
 router.get('/activas', async (req, res) => {
   try {
@@ -77,6 +90,10 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
   try {
     const { tipo, producto_id, estado, descuento_porcentaje, precio_original, precio_oferta, fecha_inicio, fecha_fin, nombre_temporada, badge_destacado, titulo_banner, subtitulo_banner, descripcion_banner, codigo_descuento } = req.body;
     if (!tipo) return res.status(400).json({ success: false, message: 'Tipo es requerido' });
+    if ((estado || 'activa') === 'activa' && producto_id) {
+      const otra = await otraPromocionActiva(producto_id, 0);
+      if (otra) return res.status(409).json({ success: false, message: mensajeCandado(otra.tipo) });
+    }
     const result = await pool.query(
       `INSERT INTO core.tblpromociones (tipo, producto_id, estado, descuento_porcentaje, precio_original, precio_oferta, fecha_inicio, fecha_fin, nombre_temporada, badge_destacado, titulo_banner, subtitulo_banner, descripcion_banner, codigo_descuento, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW()) RETURNING *`,
@@ -112,6 +129,16 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
 router.put('/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { tipo, producto_id, estado, descuento_porcentaje, precio_original, precio_oferta, fecha_inicio, fecha_fin, nombre_temporada, badge_destacado, titulo_banner, subtitulo_banner, descripcion_banner, codigo_descuento } = req.body;
+    // Candado: el resultado del UPDATE (lo que viene o, si no, lo que ya
+    // tenía, igual que sus COALESCE) no puede quedar activo junto a otra
+    const previa = await pool.query('SELECT estado::text AS estado, producto_id FROM core.tblpromociones WHERE id = $1', [req.params.id]);
+    if (previa.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
+    const estadoFinal = estado ?? previa.rows[0].estado;
+    const productoFinal = producto_id ?? previa.rows[0].producto_id;
+    if (estadoFinal === 'activa' && productoFinal) {
+      const otra = await otraPromocionActiva(productoFinal, req.params.id);
+      if (otra) return res.status(409).json({ success: false, message: mensajeCandado(otra.tipo) });
+    }
     const result = await pool.query(
       `UPDATE core.tblpromociones SET tipo=COALESCE($1,tipo), producto_id=COALESCE($2,producto_id), estado=COALESCE($3,estado),
        descuento_porcentaje=COALESCE($4,descuento_porcentaje), precio_original=COALESCE($5,precio_original), precio_oferta=COALESCE($6,precio_oferta),

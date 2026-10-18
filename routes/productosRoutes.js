@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
 const { registrarAuditoria } = require('../utils/auditoria');
 
 // ══════════════════════════════════════
@@ -313,23 +314,65 @@ router.post('/productos', verifyToken, verifyRole('empleado', 'gerencia', 'direc
   }
 });
 
+// Ajustar la existencia en línea desde la pestaña Existencias
+// (Diseno_Panel_Personal.md §4.6). "anterior" es la existencia que vio la
+// pantalla: si ya no coincide (llegó una venta mientras tanto) no se pisa y
+// se responde 409 con la actual.
+router.put('/productos/:id/existencia', accesoVigente(['empleado', 'gerencia', 'direccion_general']), async (req, res) => {
+  try {
+    if (!/^\d{1,9}$/.test(req.params.id)) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+    const id = Number(req.params.id);
+    const { existencia, anterior } = req.body;
+    // anterior: cualquier entero que quepa en la columna (la pantalla manda el que vio)
+    if (!Number.isInteger(existencia) || existencia < 0 || existencia > 9999 || !Number.isInteger(anterior) || Math.abs(anterior) > 2147483647) {
+      return res.status(400).json({ success: false, message: 'La existencia debe ser un número entero de 0 a 9999' });
+    }
+    const result = await pool.query(
+      `UPDATE core.tblproductos SET stock_online = $1, updated_at = NOW()
+        WHERE id = $2 AND stock_online = $3 RETURNING id, nombre, stock_online`,
+      [existencia, id, anterior]
+    );
+    if (result.rows.length === 0) {
+      const actual = await pool.query('SELECT stock_online FROM core.tblproductos WHERE id = $1', [id]);
+      if (actual.rows.length === 0) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      const existenciaActual = actual.rows[0].stock_online;
+      return res.status(409).json({
+        success: false,
+        message: `La existencia cambió mientras la editabas (ahora hay ${existenciaActual}). Revisa y vuelve a guardar.`,
+        existencia_actual: existenciaActual,
+      });
+    }
+    const producto = result.rows[0];
+    // Guardar el mismo número no es un cambio: la bitácora no registra "5 → 5"
+    if (anterior !== producto.stock_online) {
+      registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Ajustó existencia', entidad: 'producto', entidad_id: producto.id, detalles: `"${producto.nombre}" · ${anterior} → ${producto.stock_online}`, ip: req.ip });
+    }
+    res.json({ success: true, producto });
+  } catch (error) {
+    console.error('Error PUT /productos/:id/existencia:', error.message);
+    res.status(500).json({ success: false, message: 'Error al ajustar la existencia' });
+  }
+});
+
 router.put('/productos/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, descripcion, categoria_id, precio_chico, precio_grande, imagen_url, imagen_public_id, imagenes, ingredientes, sabor, tamano, tipo, popular, es_nuevo, stock_online, activo } = req.body;
+    // precio_grande: null explícito lo borra; si no viene, se conserva (COALESCE)
+    const borrarPrecioGrande = Object.prototype.hasOwnProperty.call(req.body, 'precio_grande') && req.body.precio_grande === null;
     // Stock previo: la bitácora solo lo menciona si cambió
     // (el formulario de edición manda el stock aunque no se toque)
     const previa = await pool.query('SELECT stock_online FROM core.tblproductos WHERE id = $1', [id]);
     const result = await pool.query(`
       UPDATE core.tblproductos SET
         nombre = COALESCE($1, nombre), descripcion = COALESCE($2, descripcion), categoria_id = COALESCE($3, categoria_id),
-        precio_chico = COALESCE($4, precio_chico), precio_grande = COALESCE($5, precio_grande),
+        precio_chico = COALESCE($4, precio_chico), precio_grande = CASE WHEN $18::boolean THEN NULL ELSE COALESCE($5, precio_grande) END,
         imagen_url = COALESCE($6, imagen_url), imagen_public_id = COALESCE($7, imagen_public_id), imagenes = COALESCE($8, imagenes),
         ingredientes = COALESCE($9, ingredientes), sabor = COALESCE($10, sabor), tamano = COALESCE($11, tamano), tipo = COALESCE($12, tipo),
         popular = COALESCE($13, popular), es_nuevo = COALESCE($14, es_nuevo), stock_online = COALESCE($15, stock_online), activo = COALESCE($16, activo),
         updated_at = NOW()
       WHERE id = $17 RETURNING *
-    `, [nombre, descripcion, categoria_id, precio_chico, precio_grande, imagen_url, imagen_public_id, imagenes ? JSON.stringify(imagenes) : null, ingredientes, sabor, tamano, tipo, popular, es_nuevo, stock_online, activo, id]);
+    `, [nombre, descripcion, categoria_id, precio_chico, precio_grande, imagen_url, imagen_public_id, imagenes ? JSON.stringify(imagenes) : null, ingredientes, sabor, tamano, tipo, popular, es_nuevo, stock_online, activo, id, borrarPrecioGrande]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
     const producto = result.rows[0];
     let detalles = `"${producto.nombre}"`;

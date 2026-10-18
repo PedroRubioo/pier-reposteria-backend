@@ -202,6 +202,53 @@ async function cargarFestivos() {
   return rows.map(r => ({ ...r, fecha: fechaISO(r.fecha) }));
 }
 
+/**
+ * Estimado de un día para todos los productos que se producen (activos,
+ * de categorías activas) y tienen historial, sin límite y en el orden del
+ * dataset base. Lo usan /demanda/dia y el Plan de producción.
+ *
+ * @param {string} fechaIso día a estimar (YYYY-MM-DD)
+ * @returns {Promise<{ vars: object, productos: Array<{ producto_id: number, nombre: string,
+ *   categoria: string, stock_online: number, unidades: number, origen: 'modelo'|'respaldo',
+ *   categorias_desconocidas?: string[], con_historico_anual: boolean }> }>}
+ */
+async function estimarDemandaDia(fechaIso) {
+  const [festivos, base, historico, catalogo] = await Promise.all([
+    cargarFestivos(),
+    basePorProducto(),
+    historicoAnioAnterior(fechaIso),
+    pool.query(`SELECT p.id, p.nombre, p.stock_online, c.nombre AS categoria
+                FROM core.tblproductos p JOIN core.tblcategorias c ON c.id = p.categoria_id
+                WHERE p.activo = true AND c.activo = true`),
+  ]);
+
+  const vars = variablesCalendario(fechaIso, festivos);
+  const info = new Map(catalogo.rows.map(r => [r.id, r]));
+
+  const productos = [];
+  for (const [productoId, datos] of base) {
+    const prod = info.get(productoId);
+    if (!prod) continue; // producto inactivo: no se produce
+    const promedioDow = datos.dow.get(vars.dia_sem) ?? (datos.n ? datos.suma / datos.n : 0);
+    const { unidades, origen, categorias_desconocidas } = predecirUnidades({
+      promedio_dow: promedioDow,
+      promedio_general: datos.n ? datos.suma / datos.n : 0,
+      hist_anio_ant: historico.get(productoId) ?? null,
+    }, vars, productoId);
+    productos.push({
+      producto_id: productoId,
+      nombre: prod.nombre,
+      categoria: prod.categoria,
+      stock_online: prod.stock_online,
+      unidades,
+      origen,
+      categorias_desconocidas,
+      con_historico_anual: historico.has(productoId),
+    });
+  }
+  return { vars, productos };
+}
+
 module.exports = {
   aFechaLocal,
   fechaISO,
@@ -212,6 +259,7 @@ module.exports = {
   basePorProducto,
   historicoAnioAnterior,
   cargarFestivos,
+  estimarDemandaDia,
   infoModelo: modelo.infoModelo,
   fueraDeRango: modelo.fueraDeRango,
   TOPE_DIAS,

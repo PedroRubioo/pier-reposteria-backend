@@ -207,6 +207,7 @@ const comandasRoutes = require('./routes/comandasRoutes');
 const publicacionesRoutes = require('./routes/publicacionesRoutes');
 const contenidoRoutes = require('./routes/contenidoRoutes');
 const sistemaRoutes = require('./routes/sistemaRoutes');
+const turnoRoutes = require('./routes/turnoRoutes');
 
 
 
@@ -246,6 +247,7 @@ app.use('/api/comandas', comandasRoutes);
 app.use('/api/publicaciones', publicacionesRoutes);
 app.use('/api/contenido', contenidoRoutes);
 app.use('/api/sistema', sistemaRoutes);
+app.use('/api/turno', turnoRoutes);
 
 
 // ========================================

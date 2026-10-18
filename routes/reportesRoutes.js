@@ -222,12 +222,12 @@ router.get('/actividad-equipo', verifyToken, verifyRole('gerencia', 'direccion_g
 const VENTAS_ACCESO = accesoVigente(['gerencia', 'direccion_general']);
 const RANGO_MAXIMO_DIAS = 366;
 
-// ?periodo=mes|trimestre|anio (mes si no se envía)
+// ?periodo=semana|mes|trimestre|anio (mes si no se envía)
 router.get('/resumen', VENTAS_ACCESO, async (req, res) => {
   try {
     const periodo = enviado(req.query.periodo) ? req.query.periodo : 'mes';
     if (!PERIODOS.includes(periodo)) {
-      return res.status(400).json({ success: false, message: 'Periodo inválido: usa mes, trimestre o anio' });
+      return res.status(400).json({ success: false, message: 'Periodo inválido: usa semana, mes, trimestre o anio' });
     }
     res.json({ success: true, ...(await resumenDelPeriodo(periodo)) });
   } catch (error) {

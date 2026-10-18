@@ -207,25 +207,78 @@ router.get('/:id', verifyToken, async (req, res) => {
 });
 
 // ── Listar todos los pedidos (empleado+) ──
+// Sin `vista` se comporta como siempre (la skill de Alexa usa ?limite= y
+// ?estado=): los 100 más recientes. vista=abiertos y vista=historial son
+// las bandejas de la página de Pedidos; buscar y completo=1 son opcionales
+// (Diseno_Panel_Personal.md §4.3).
+
+// Hora comprometida con el cliente: la recogida, la entrega a domicilio
+// (timestamp guardado en UTC) o, si no hay, cuándo se hizo el pedido
+const COMPROMISO_PEDIDO = `COALESCE(p.horario_recogida, p.horario_entrega AT TIME ZONE 'UTC', p.created_at)`;
+const VISTAS_PEDIDOS = {
+  abiertos: { filtro: `p.estado NOT IN ('completado', 'entregado', 'cancelado')`, orden: `${COMPROMISO_PEDIDO} ASC, p.id`, porDefecto: 500, maximo: 500 },
+  historial: { filtro: `p.estado IN ('completado', 'entregado', 'cancelado')`, orden: 'p.updated_at DESC, p.id DESC', porDefecto: 50, maximo: 200 },
+};
+// completo=1: los renglones del pedido y su entrega más reciente (activa o no)
+const DETALLE_COMPLETO = `
+      LEFT JOIN LATERAL (SELECT COALESCE(json_agg(json_build_object('producto_id', i.producto_id, 'nombre', i.nombre_producto,
+               'cantidad', i.cantidad, 'tamano', i.tamano, 'precio_unitario', i.precio_unitario, 'subtotal', i.subtotal)
+               ORDER BY i.id), '[]'::json) AS items FROM core.tblpedido_items i WHERE i.pedido_id = p.id) it ON TRUE
+      LEFT JOIN LATERAL (SELECT json_build_object('id', x.id, 'estado', x.estado,
+               'repartidor_nombre', TRIM(rr.nombre || ' ' || rr.apellido), 'motivo_fallo', x.motivo_fallo,
+               'recibio_nombre', x.recibio_nombre, 'evidencia_url', x.evidencia_url,
+               'asignado_at', x.asignado_at AT TIME ZONE 'UTC', 'finalizado_at', x.finalizado_at AT TIME ZONE 'UTC') AS ultima_entrega
+               FROM core.tblentregas x JOIN core.tblusuarios rr ON rr.id = x.repartidor_id
+              WHERE x.pedido_id = p.id ORDER BY x.id DESC LIMIT 1) ue ON TRUE`;
+
 router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
-    const { estado, limite, offset } = req.query;
+    const { estado, limite, offset, vista } = req.query;
+    if (vista !== undefined && vista !== 'abiertos' && vista !== 'historial') {
+      return res.status(400).json({ success: false, message: 'Vista no válida. Valores: abiertos, historial' });
+    }
+    const bandeja = vista === 'abiertos' ? VISTAS_PEDIDOS.abiertos : vista === 'historial' ? VISTAS_PEDIDOS.historial : null;
+    const completo = req.query.completo === '1';
+    const buscar = typeof req.query.buscar === 'string' ? req.query.buscar.trim().slice(0, 100) : '';
+
     let query = `SELECT p.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, u.email AS cliente_email, pg.estado AS estado_pago, pg.stripe_payment_id, pg.monto_total AS monto_pago,
-      r.nombre AS repartidor_nombre, r.apellido AS repartidor_apellido
+      r.nombre AS repartidor_nombre, r.apellido AS repartidor_apellido,
+      u.telefono AS cliente_telefono, e.id AS entrega_id, r.telefono AS repartidor_telefono, ${COMPROMISO_PEDIDO} AS compromiso${completo ? ', it.items, ue.ultima_entrega' : ''}
       FROM core.tblpedidos p
       JOIN core.tblusuarios u ON p.usuario_id = u.id
       LEFT JOIN core.tblpagos pg ON pg.pedido_id = p.id
       LEFT JOIN core.tblentregas e ON e.pedido_id = p.id AND e.estado IN ('asignada', 'en_camino')
-      LEFT JOIN core.tblusuarios r ON r.id = e.repartidor_id
+      LEFT JOIN core.tblusuarios r ON r.id = e.repartidor_id${completo ? DETALLE_COMPLETO : ''}
       WHERE 1=1`;
     const params = [];
     let pi = 1;
+    if (bandeja) query += ` AND ${bandeja.filtro}`;
     if (estado) { query += ` AND p.estado = $${pi}`; params.push(estado); pi++; }
-    query += ` ORDER BY p.created_at DESC`;
-    query += ` LIMIT $${pi} OFFSET $${pi + 1}`;
-    params.push(parseInt(String(limite)) || 100, parseInt(String(offset)) || 0);
+    if (buscar) {
+      // Número de pedido, nombre o correo del cliente; % _ y \ cuentan como texto
+      query += ` AND (p.numero ILIKE $${pi} OR (u.nombre || ' ' || u.apellido) ILIKE $${pi} OR u.email ILIKE $${pi})`;
+      params.push(`%${buscar.replace(/[\\%_]/g, '\\$&')}%`);
+      pi++;
+    }
+    if (!bandeja) {
+      query += ` ORDER BY p.created_at DESC`;
+      query += ` LIMIT $${pi} OFFSET $${pi + 1}`;
+      params.push(parseInt(String(limite)) || 100, parseInt(String(offset)) || 0);
+      const result = await pool.query(query, params);
+      return res.json({ success: true, pedidos: result.rows });
+    }
+
+    const solicitado = Number.parseInt(String(limite), 10);
+    const tope = Number.isFinite(solicitado) && solicitado >= 1 ? Math.min(solicitado, bandeja.maximo) : bandeja.porDefecto;
+    const desde = Math.max(Number.parseInt(String(offset), 10) || 0, 0);
+    // En el historial se pide una fila de más: dice si hay otra página
+    const conHayMas = vista === 'historial';
+    query += ` ORDER BY ${bandeja.orden} LIMIT $${pi} OFFSET $${pi + 1}`;
+    params.push(conHayMas ? tope + 1 : tope, desde);
     const result = await pool.query(query, params);
-    res.json({ success: true, pedidos: result.rows });
+    if (!conHayMas) return res.json({ success: true, pedidos: result.rows });
+    const hayMas = result.rows.length > tope;
+    res.json({ success: true, pedidos: hayMas ? result.rows.slice(0, tope) : result.rows, hay_mas: hayMas });
   } catch (error) {
     console.error('Error GET /pedidos:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener pedidos' });
@@ -233,8 +286,13 @@ router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gener
 });
 
 // ── Cambiar estado del pedido (empleado+) ──
+// Cancelar un pedido abierto (Diseno_Panel_Personal.md §4.4), en la misma
+// transacción: repone el inventario, quita el «por confirmar», cierra la
+// entrega activa y, si el pedido está pagado y no tiene ya un reembolso
+// vivo, genera la solicitud de reembolso. Un pedido entregado ya no se
+// cancela; re-cancelar uno cancelado sigue como antes, sin esas acciones.
 router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
-  const client = await pool.connect();
+  let client;
   try {
     const { estado, nota_cancelacion } = req.body;
     // Los estados de entrega (asignado/en_camino/entregado/entrega_fallida) los maneja
@@ -242,23 +300,43 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
     const validos = ['pendiente', 'en_preparacion', 'listo', 'completado', 'cancelado', 'asignado', 'en_camino', 'entregado', 'entrega_fallida'];
     if (!validos.includes(estado)) return res.status(400).json({ success: false, message: `Estado inválido. Valores: ${validos.join(', ')}` });
 
+    client = await pool.connect();
     await client.query('BEGIN');
+    // Al cancelar, primero la entrega activa y después el pedido: el mismo
+    // orden que el repartidor al cambiar su estado y que /liberar
+    // (entregasRoutes.js). Si actúan a la vez, se forman en lugar de caer en
+    // un bloqueo mutuo
+    if (estado === 'cancelado') {
+      await client.query(
+        `SELECT id FROM core.tblentregas WHERE pedido_id = $1 AND estado IN ('asignada', 'en_camino') FOR UPDATE`,
+        [req.params.id]
+      );
+    }
     const previoResult = await client.query('SELECT estado FROM core.tblpedidos WHERE id = $1 FOR UPDATE', [req.params.id]);
     if (previoResult.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Pedido no encontrado' }); }
     const estadoPrevio = previoResult.rows[0].estado;
+    if (estado === 'cancelado' && (estadoPrevio === 'completado' || estadoPrevio === 'entregado')) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, message: 'Este pedido ya se entregó y no se puede cancelar' });
+    }
+    const cancelaAbierto = estado === 'cancelado' && estadoPrevio !== 'cancelado';
 
     const updates = [estado];
     let query = 'UPDATE core.tblpedidos SET estado = $1, updated_at = NOW()';
     let pi = 2;
+    if (cancelaAbierto) query += ', por_confirmar = FALSE';
     if (estado === 'cancelado' && nota_cancelacion) { query += `, nota_cancelacion = $${pi}`; updates.push(nota_cancelacion); pi++; }
     query += ` WHERE id = $${pi} RETURNING *`;
     updates.push(req.params.id);
     const result = await client.query(query, updates);
+    const pedido = result.rows[0];
 
-    // Cancelación: reponer el inventario que este pedido descontó.
-    // stock_descontado queda en 0 tras reponer, así una re-cancelación no
-    // duplica la devolución (y reactivar un cancelado no vuelve a descontar).
-    if (estado === 'cancelado' && estadoPrevio !== 'cancelado') {
+    let entregasCerradas = [];
+    let reembolso = null;
+    if (cancelaAbierto) {
+      // Reponer el inventario que este pedido descontó. stock_descontado
+      // queda en 0 tras reponer, así una re-cancelación no duplica la
+      // devolución (y reactivar un cancelado no vuelve a descontar).
       await client.query(
         `UPDATE core.tblproductos p
          SET stock_online = p.stock_online + i.stock_descontado, updated_at = NOW()
@@ -267,13 +345,55 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
         [req.params.id]
       );
       await client.query('UPDATE core.tblpedido_items SET stock_descontado = 0 WHERE pedido_id = $1', [req.params.id]);
+
+      // La nota de la sucursal acompaña al motivo de la entrega y al reembolso
+      const nota = nota_cancelacion ? String(nota_cancelacion).trim() : '';
+      const conNota = nota ? `: ${nota}` : '';
+      const entregas = await client.query(
+        `UPDATE core.tblentregas SET estado = 'fallida', motivo_fallo = $2, finalizado_at = NOW(), updated_at = NOW()
+          WHERE pedido_id = $1 AND estado IN ('asignada', 'en_camino')
+         RETURNING id, repartidor_id`,
+        [pedido.id, recortar(`Pedido cancelado por la sucursal${conNota}`, 300)]
+      );
+      entregasCerradas = entregas.rows;
+
+      // Reembolso automático: solo si se cobró en línea y no hay ya uno vivo
+      // (la descripción la reconoce GET /api/reembolsos como automática)
+      const cobro = await client.query(
+        `SELECT EXISTS (SELECT 1 FROM core.tblpagos WHERE pedido_id = $1 AND estado = 'pagado') AS pagado,
+                EXISTS (SELECT 1 FROM core.tblreembolsos WHERE pedido_id = $1
+                         AND estado IN ('pendiente', 'en_revision', 'aprobado', 'procesado')) AS con_reembolso`,
+        [pedido.id]
+      );
+      if (cobro.rows[0].pagado && !cobro.rows[0].con_reembolso) {
+        const nuevo = await client.query(
+          `INSERT INTO core.tblreembolsos (pedido_id, producto_id, usuario_id, monto, motivo, descripcion, fotos_evidencia, estado, created_at, updated_at)
+           VALUES ($1, NULL, $2, $3, 'otro', $4, NULL, 'pendiente', NOW(), NOW())
+           RETURNING id, monto`,
+          [pedido.id, pedido.usuario_id, pedido.total, recortar(`Pedido #${pedido.numero} cancelado por la sucursal${conNota}`, 300)]
+        );
+        reembolso = nuevo.rows[0];
+      }
     }
     await client.query('COMMIT');
 
-    // Crear notificación para el cliente
-    const pedido = result.rows[0];
     // Anterior y nuevo salen de la base (FOR UPDATE y RETURNING), no del body
     registrarAuditoria({ usuario_id: req.user.userId, accion: 'Cambió estado de pedido', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero} · ${estadoPrevio} → ${pedido.estado}`, ip: req.ip });
+    if (reembolso) {
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Generó reembolso por cancelación', entidad: 'reembolso', entidad_id: reembolso.id, detalles: `#${pedido.numero} · $${parseFloat(reembolso.monto).toFixed(2)}`, ip: req.ip });
+    }
+    if (entregasCerradas.length > 0) {
+      // Al repartidor que la llevaba: ya no la entregue
+      const { crearNotificacion } = require('../services/notificacionHelper');
+      await Promise.all(entregasCerradas.map(e => crearNotificacion({
+        usuario_id: e.repartidor_id,
+        tipo: 'alerta',
+        titulo: 'Entrega cancelada',
+        mensaje: `El pedido #${pedido.numero} se canceló; ya no lo entregues.`,
+      })));
+    }
+
+    // Notificación para el cliente
     const esDomicilio = pedido.tipo_entrega === 'domicilio';
     const mensajes = {
       en_preparacion: { titulo: 'Pedido en preparación', mensaje: `Tu pedido #${pedido.numero} ha comenzado a prepararse.`, tipo: 'pedido' },
@@ -281,7 +401,15 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
         ? { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo. Pronto saldrá en camino a tu domicilio.`, tipo: 'pedido' }
         : { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo para recoger en Sucursal Principal.`, tipo: 'pedido' },
       completado: { titulo: 'Pedido completado', mensaje: `Tu pedido #${pedido.numero} ha sido entregado. ¡Gracias por tu compra!`, tipo: 'pedido' },
-      cancelado: { titulo: 'Pedido cancelado', mensaje: `Tu pedido #${pedido.numero} ha sido cancelado. ${nota_cancelacion || ''}`.trim(), tipo: 'sistema' },
+      // Con reembolso no se promete la devolución: la decide gerencia
+      cancelado: {
+        titulo: 'Pedido cancelado',
+        mensaje: [
+          `Tu pedido #${pedido.numero} ha sido cancelado. ${nota_cancelacion || ''}`.trim(),
+          reembolso ? 'Generamos tu solicitud de reembolso; te avisaremos cuando se revise.' : null,
+        ].filter(Boolean).join(' '),
+        tipo: 'sistema',
+      },
     };
     const notif = mensajes[estado]; // eslint-disable-line security/detect-object-injection
     if (notif) {
@@ -317,12 +445,17 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       }
     }
 
-    res.json({ success: true, pedido });
+    res.json({ success: true, pedido, reembolso_generado: reembolso !== null, entrega_cerrada: entregasCerradas.length > 0 });
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    // Respaldo: si Postgres corta un bloqueo mutuo (40P01), se explica en
+    // lugar de un 500 genérico
+    if (error.code === '40P01') {
+      return res.status(409).json({ success: false, message: 'Otra persona cambió este pedido al mismo tiempo; recarga e intenta de nuevo' });
+    }
     console.error('Error PUT /pedidos/:id/estado:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar estado' });
-  } finally { client.release(); }
+  } finally { if (client) client.release(); }
 });
 
 // ── Aprobar un pedido programado "por confirmar" (empleado+) ──

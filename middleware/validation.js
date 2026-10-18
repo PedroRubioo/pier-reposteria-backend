@@ -92,6 +92,14 @@ function sanitizeRequestMiddleware(req, res, next) {
       return next();
     }
 
+    // 🔧 EXCEPCIÓN: avisos a clientes. routes/notificacionesRoutes.js valida
+    // título, mensaje, tipo y destinatarios; el SQL es parametrizado, la ruta
+    // no manda correo y la web y la app pintan el aviso como texto. Escapar
+    // aquí haría leer al cliente "18&#x2F;10" y "150" en vez de "18/10" y "$150".
+    if (req.path === '/api/notificaciones/enviar') {
+      return next();
+    }
+
     // 🔧 EXCEPCIÓN: SQL de Respaldos (restaurar) y de Monitoreo (EXPLAIN).
     // Escapar convertía ' en &#x27; y > en &gt;: ninguna sentencia con textos
     // o comparaciones llegaba entera. Cada ruta revisa su SQL (restaurar solo

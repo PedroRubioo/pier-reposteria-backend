@@ -4,8 +4,12 @@ const router = express.Router();
 const he = require('he'); // 🔒 SEGURIDAD: sanitización de HTML
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
 const { notificarConEmail, crearNotificacion } = require('../services/notificacionHelper');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
+
+/** Id de base de datos (de la ruta o del cuerpo): entero positivo; null si no lo es */
+const idDe = (valor) => (/^\d{1,9}$/.test(String(valor)) && Number(valor) >= 1 ? Number(valor) : null);
 
 // ── Mis entregas del día (repartidor) ──
 router.get('/mis-entregas', verifyToken, verifyRole('repartidor'), async (req, res) => {
@@ -281,6 +285,135 @@ router.post('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_gene
     console.error('Error POST /entregas:', error.message);
     res.status(500).json({ success: false, message: 'Error al asignar entrega' });
   } finally { client.release(); }
+});
+
+// ── Cambiar o quitar repartidor (empleado+; Diseno_Panel_Personal.md §4.5) ──
+// Libera una entrega activa atorada: la cierra como fallida con el motivo y,
+// si se elige a otro repartidor y el pedido queda listo, se la asigna. Sirve
+// en cualquier estado del pedido; el rol se lee de la base.
+router.post('/:id/liberar', accesoVigente(['empleado', 'gerencia', 'direccion_general']), async (req, res) => {
+  const entregaId = idDe(req.params.id);
+  if (!entregaId) return res.status(404).json({ success: false, message: 'Entrega no encontrada' });
+  // El sanitizador global escapa el motivo ("/" llega como "&#x2F;"): se mide
+  // lo que escribió la persona, no las entidades
+  const motivo = typeof req.body.motivo === 'string' ? req.body.motivo.trim() : '';
+  const largoMotivo = Array.from(he.decode(motivo)).length;
+  if (largoMotivo < 5) return res.status(400).json({ success: false, message: 'Escribe el motivo (mínimo 5 caracteres)' });
+  if (largoMotivo > 200) return res.status(400).json({ success: false, message: 'El motivo admite hasta 200 caracteres' });
+  const reasigna = req.body.repartidor_id !== undefined && req.body.repartidor_id !== null;
+  const nuevoId = reasigna ? idDe(req.body.repartidor_id) : null;
+  if (reasigna && !nuevoId) return res.status(400).json({ success: false, message: 'Repartidor no válido o no disponible' });
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    // Primero la entrega y después el pedido, en el mismo orden que el
+    // repartidor al cambiar su estado: si los dos actúan a la vez, se forman
+    const entregaResult = await client.query(
+      `SELECT e.id, e.pedido_id, e.repartidor_id, e.estado, r.nombre AS repartidor_nombre, r.apellido AS repartidor_apellido
+         FROM core.tblentregas e
+         JOIN core.tblusuarios r ON r.id = e.repartidor_id
+        WHERE e.id = $1
+        FOR UPDATE OF e`,
+      [entregaId]
+    );
+    const entrega = entregaResult.rows[0];
+    if (!entrega) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Entrega no encontrada' }); }
+    if (!['asignada', 'en_camino'].includes(entrega.estado)) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: 'Esta entrega ya terminó' }); }
+    if (nuevoId === entrega.repartidor_id) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: 'Ese repartidor ya tiene la entrega' }); }
+
+    const pedidoResult = await client.query(
+      'SELECT id, numero, usuario_id, estado::text AS estado, tipo_entrega FROM core.tblpedidos WHERE id = $1 FOR UPDATE',
+      [entrega.pedido_id]
+    );
+    const pedido = pedidoResult.rows[0];
+    // Asignado o en camino vuelve a listo. Cualquier otro estado se conserva:
+    // son datos incoherentes ("listo" o "en preparación" con entrega activa)
+    // y un pedido cerrado no se reabre
+    const estadoSinEntrega = ['asignado', 'en_camino'].includes(pedido.estado) ? 'listo' : pedido.estado;
+
+    let nuevo = null;
+    if (reasigna) {
+      if (estadoSinEntrega !== 'listo' || pedido.tipo_entrega !== 'domicilio') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, message: 'Este pedido no está listo para salir: solo puedes quitar al repartidor' });
+      }
+      const repartidorResult = await client.query(
+        `SELECT id, nombre, apellido FROM core.tblusuarios WHERE id = $1 AND rol = 'repartidor' AND activo = TRUE AND disponible = TRUE`,
+        [nuevoId]
+      );
+      nuevo = repartidorResult.rows[0] || null;
+      if (!nuevo) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: 'Repartidor no válido o no disponible' }); }
+    }
+
+    await client.query(
+      `UPDATE core.tblentregas SET estado = 'fallida', motivo_fallo = $1, finalizado_at = NOW(), updated_at = NOW() WHERE id = $2`,
+      [`Retirada por ${req.usuario.nombre}: ${motivo}`, entrega.id]
+    );
+    // La entrega vieja ya no está activa: el índice único de entrega activa
+    // por pedido admite la nueva
+    let entregaNueva = null;
+    if (nuevo) {
+      const insertada = await client.query(
+        `INSERT INTO core.tblentregas (pedido_id, repartidor_id, estado, asignado_por, asignado_at, created_at, updated_at)
+         VALUES ($1, $2, 'asignada', $3, NOW(), NOW(), NOW()) RETURNING *`,
+        [pedido.id, nuevo.id, req.usuario.id]
+      );
+      entregaNueva = insertada.rows[0];
+    }
+    const estadoFinal = nuevo ? 'asignado' : estadoSinEntrega;
+    if (nuevo || estadoFinal !== pedido.estado) {
+      await client.query('UPDATE core.tblpedidos SET estado = $1, updated_at = NOW() WHERE id = $2', [estadoFinal, pedido.id]);
+    }
+    await client.query('COMMIT');
+    client.release();
+    client = null;
+
+    const anterior = `${entrega.repartidor_nombre} ${entrega.repartidor_apellido}`;
+    registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Retiró entrega al repartidor', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero} · ${anterior} · ${recortar(motivo, 80)}`, ip: req.ip });
+    if (nuevo) {
+      registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Asignó repartidor', entidad: 'pedido', entidad_id: pedido.id, detalles: `#${pedido.numero} → ${nuevo.nombre} ${nuevo.apellido}`, ip: req.ip });
+    }
+
+    await crearNotificacion({
+      usuario_id: entrega.repartidor_id,
+      tipo: 'alerta',
+      titulo: 'Se te retiró una entrega',
+      mensaje: `El pedido #${pedido.numero} ya no está a tu cargo: ${motivo}`,
+    });
+    if (nuevo) {
+      // Los mismos dos avisos que una asignación manual (POST /)
+      await crearNotificacion({
+        usuario_id: nuevo.id,
+        tipo: 'pedido',
+        titulo: 'Nueva entrega asignada',
+        mensaje: `Se te asignó el pedido #${pedido.numero}. Revisa tu panel de entregas.`,
+      });
+      await crearNotificacion({
+        usuario_id: pedido.usuario_id,
+        tipo: 'pedido',
+        titulo: '¡Un repartidor tomó tu pedido!',
+        mensaje: `${nuevo.nombre} llevará tu pedido #${pedido.numero} y saldrá pronto rumbo a tu domicilio.`,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: nuevo ? `Pedido #${pedido.numero} reasignado a ${nuevo.nombre} ${nuevo.apellido}` : `Se quitó a ${anterior} del pedido #${pedido.numero}`,
+      pedido: { id: pedido.id, numero: pedido.numero, estado: estadoFinal },
+      entrega: entregaNueva,
+    });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') {
+      return res.status(400).json({ success: false, message: 'El pedido ya tiene una entrega activa' });
+    }
+    console.error('Error POST /entregas/:id/liberar:', error.message);
+    res.status(500).json({ success: false, message: 'Error al cambiar el repartidor' });
+  } finally {
+    if (client) client.release();
+  }
 });
 
 // ── Cambiar estado de MI entrega (repartidor) ──

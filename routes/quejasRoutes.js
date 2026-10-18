@@ -43,8 +43,11 @@ router.get('/mis-quejas', verifyToken, async (req, res) => {
 router.get('/', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
     const { estado } = req.query;
-    let query = `SELECT q.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, u.email AS cliente_email
-      FROM core.tblquejas q JOIN core.tblusuarios u ON q.usuario_id = u.id`;
+    // Teléfono y número de pedido: la pantalla enlaza al pedido exacto y al cliente
+    let query = `SELECT q.*, u.nombre AS cliente_nombre, u.apellido AS cliente_apellido, u.email AS cliente_email,
+        u.telefono AS cliente_telefono, ped.numero AS pedido_numero
+      FROM core.tblquejas q JOIN core.tblusuarios u ON q.usuario_id = u.id
+      LEFT JOIN core.tblpedidos ped ON ped.id = q.pedido_id`;
     const params = [];
     if (estado) { query += ' WHERE q.estado = $1'; params.push(estado); }
     query += ' ORDER BY q.created_at DESC';

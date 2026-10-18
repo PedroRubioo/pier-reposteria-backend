@@ -8,14 +8,22 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
 const { registrarAuditoria } = require('../utils/auditoria');
+const { diaHuejutla, sumarDias } = require('../utils/fechasHuejutla');
 const {
   fechaISO, variablesCalendario, predecirUnidades,
-  basePorProducto, historicoAnioAnterior, cargarFestivos, infoModelo, fueraDeRango,
+  basePorProducto, cargarFestivos, estimarDemandaDia, infoModelo, fueraDeRango,
 } = require('../utils/prediccionDemanda');
 
 const SOLO_DIRECCION = verifyRole('direccion_general');
 const GERENCIA_ARRIBA = verifyRole('gerencia', 'direccion_general');
+
+// 'YYYY-MM-DD' que existe en el calendario (rechaza 2026-02-30), como en reportesRoutes
+function esFecha(valor) {
+  const m = typeof valor === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(valor) : null;
+  return m !== null && new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).toISOString().slice(0, 10) === valor;
+}
 
 // ══════════════════════════════════════
 // FECHAS ESPECIALES (calendario editable)
@@ -167,41 +175,8 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
     }
     const limite = Math.min(parseInt(req.query.limite, 10) || 12, 50);
 
-    const [festivos, base, historico, catalogo] = await Promise.all([
-      cargarFestivos(),
-      basePorProducto(),
-      historicoAnioAnterior(fecha),
-      pool.query(`SELECT p.id, p.nombre, p.stock_online, c.nombre AS categoria
-                  FROM core.tblproductos p JOIN core.tblcategorias c ON c.id = p.categoria_id
-                  WHERE p.activo = true AND c.activo = true`),
-    ]);
-
-    const vars = variablesCalendario(fecha, festivos);
-    const info = new Map(catalogo.rows.map(r => [r.id, r]));
-
-    const productos = [];
-    let total = 0;
-    for (const [productoId, datos] of base) {
-      const prod = info.get(productoId);
-      if (!prod) continue; // producto inactivo: no se produce
-      const promedioDow = datos.dow.get(vars.dia_sem) ?? (datos.n ? datos.suma / datos.n : 0);
-      const { unidades, origen, categorias_desconocidas } = predecirUnidades({
-        promedio_dow: promedioDow,
-        promedio_general: datos.n ? datos.suma / datos.n : 0,
-        hist_anio_ant: historico.get(productoId) ?? null,
-      }, vars, productoId);
-      total += unidades;
-      productos.push({
-        producto_id: productoId,
-        nombre: prod.nombre,
-        categoria: prod.categoria,
-        stock_online: prod.stock_online,
-        unidades,
-        origen,
-        categorias_desconocidas,
-        con_historico_anual: historico.has(productoId),
-      });
-    }
+    const { vars, productos } = await estimarDemandaDia(fecha);
+    const total = productos.reduce((suma, p) => suma + p.unidades, 0);
     productos.sort((a, b) => b.unidades - a.unidades);
 
     // Mismo cálculo agregado por categoría
@@ -228,6 +203,139 @@ router.get('/demanda/dia', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
   } catch (error) {
     console.error('Error GET /demanda/dia:', error.message);
     res.status(500).json({ success: false, message: 'Error al calcular la demanda del día' });
+  }
+});
+
+// ══════════════════════════════════════
+// PLAN DE PRODUCCIÓN (Diseno_Panel_Personal.md §4.7)
+// ══════════════════════════════════════
+
+// El mismo horizonte que la agenda de comandas
+const HORIZONTE_PLAN_DIAS = 60;
+
+// $1 = el día. En pedidos abiertos de ese día, solo lo que NO salió de
+// existencias (los «por confirmar»): lo demás ya está hecho y apartado
+const SQL_APARTADO_PEDIDOS = `
+  SELECT i.producto_id, SUM(i.cantidad - i.stock_descontado)::int AS unidades
+    FROM core.tblpedido_items i JOIN core.tblpedidos p ON p.id = i.pedido_id
+   WHERE p.estado NOT IN ('completado', 'entregado', 'cancelado') AND i.producto_id IS NOT NULL
+     AND (COALESCE(p.horario_recogida, p.horario_entrega AT TIME ZONE 'UTC', p.created_at)
+          AT TIME ZONE 'America/Mexico_City')::date = $1::date
+   GROUP BY i.producto_id HAVING SUM(i.cantidad - i.stock_descontado) > 0`;
+
+// Productos del catálogo en comandas activas de ese día
+const SQL_APARTADO_COMANDAS = `
+  SELECT ci.producto_id, SUM(ci.cantidad)::int AS unidades
+    FROM core.tblcomanda_items ci JOIN core.tblcomandas c ON c.id = ci.comanda_id
+   WHERE c.estado = 'activa' AND c.fecha_entrega = $1::date AND ci.tipo = 'producto' AND ci.producto_id IS NOT NULL
+   GROUP BY ci.producto_id`;
+
+// Pasteles por encargo con el «Enterado» vigente de cada área
+const SQL_PASTELES = `
+  SELECT c.id AS comanda_id, c.folio, to_char(c.hora_entrega, 'HH24:MI') AS hora_entrega, c.cliente_nombre,
+         ci.cantidad, ci.sabor, ci.tamano, ci.forma, ci.num_pisos, ci.decoracion, ci.leyenda,
+         EXISTS (SELECT 1 FROM core.tblcomanda_confirmaciones f
+                  WHERE f.comanda_id = c.id AND f.area = 'hornos' AND f.version = c.version) AS enterado_hornos,
+         EXISTS (SELECT 1 FROM core.tblcomanda_confirmaciones f
+                  WHERE f.comanda_id = c.id AND f.area = 'decoracion' AND f.version = c.version) AS enterado_decoracion
+    FROM core.tblcomandas c JOIN core.tblcomanda_items ci ON ci.comanda_id = c.id
+   WHERE c.estado = 'activa' AND c.fecha_entrega = $1::date AND ci.tipo = 'pastel'
+   ORDER BY c.hora_entrega, c.folio, ci.orden`;
+
+// Qué preparar un día: la venta en línea estimada por el modelo, más lo ya
+// apartado para ese día en pedidos y comandas. No se cuenta dos veces: el
+// modelo estima por el día en que se HACE el pedido, y lo apartado en
+// pedidos son programados que se hicieron antes. La existencia en línea no
+// se resta (no dice cuánto queda en vitrina): va solo de referencia.
+// ?fecha=YYYY-MM-DD (mañana si no se envía), de hoy a hoy + 60
+router.get('/demanda/plan', accesoVigente(['gerencia', 'direccion_general']), async (req, res) => {
+  const hoy = diaHuejutla();
+  const fecha = req.query.fecha === undefined || req.query.fecha === '' ? sumarDias(hoy, 1) : req.query.fecha;
+  if (!esFecha(fecha)) return res.status(400).json({ success: false, message: 'Fecha inválida: usa el formato AAAA-MM-DD' });
+  if (fecha < hoy || fecha > sumarDias(hoy, HORIZONTE_PLAN_DIAS)) {
+    return res.status(400).json({ success: false, message: 'Elige un día entre hoy y dentro de 60 días' });
+  }
+  try {
+    const [{ vars, productos: estimados }, pedidosR, comandasR, pastelesR] = await Promise.all([
+      estimarDemandaDia(fecha),
+      pool.query(SQL_APARTADO_PEDIDOS, [fecha]),
+      pool.query(SQL_APARTADO_COMANDAS, [fecha]),
+      pool.query(SQL_PASTELES, [fecha]),
+    ]);
+
+    const estimadoDe = new Map(estimados.map(e => [e.producto_id, e]));
+    const enPedidos = new Map(pedidosR.rows.map(r => [r.producto_id, r.unidades]));
+    const enComandas = new Map(comandasR.rows.map(r => [r.producto_id, r.unidades]));
+    const ids = new Set([
+      ...estimados.filter(e => e.unidades > 0).map(e => e.producto_id),
+      ...enPedidos.keys(),
+      ...enComandas.keys(),
+    ]);
+
+    // Lo apartado sin estimado (inactivo o sin historial): nombre y existencia del catálogo
+    const sinEstimado = [...ids].filter(id => !estimadoDe.has(id));
+    const catalogoR = sinEstimado.length > 0
+      ? await pool.query(
+        `SELECT p.id, p.nombre, p.stock_online, c.nombre AS categoria
+         FROM core.tblproductos p LEFT JOIN core.tblcategorias c ON c.id = p.categoria_id
+         WHERE p.id = ANY($1::int[])`, [sinEstimado])
+      : { rows: [] };
+    const catalogo = new Map(catalogoR.rows.map(r => [r.id, r]));
+
+    const productos = [...ids].map(id => {
+      const estimado = estimadoDe.get(id);
+      const producto = estimado || catalogo.get(id);
+      const unidades = estimado ? estimado.unidades : 0;
+      const apartadoPedidos = enPedidos.get(id) || 0;
+      const apartadoComandas = enComandas.get(id) || 0;
+      return {
+        producto_id: id,
+        nombre: producto ? producto.nombre : null,
+        categoria: producto ? producto.categoria : null,
+        estimado: unidades,
+        origen: estimado ? estimado.origen : null,
+        apartado_pedidos: apartadoPedidos,
+        apartado_comandas: apartadoComandas,
+        a_preparar: unidades + apartadoPedidos + apartadoComandas,
+        existencia: producto ? producto.stock_online : null,
+      };
+    }).sort((a, b) => b.a_preparar - a.a_preparar || (a.nombre || '').localeCompare(b.nombre || '', 'es'));
+
+    const pasteles = pastelesR.rows.map(r => ({
+      comanda_id: r.comanda_id, folio: r.folio, hora_entrega: r.hora_entrega, cliente_nombre: r.cliente_nombre,
+      cantidad: r.cantidad, sabor: r.sabor, tamano: r.tamano, forma: r.forma, num_pisos: r.num_pisos,
+      decoracion: r.decoracion, leyenda: r.leyenda,
+      enterado: { hornos: r.enterado_hornos, decoracion: r.enterado_decoracion },
+    }));
+
+    const totales = { estimado: 0, apartado_pedidos: 0, apartado_comandas: 0, a_preparar: 0, pasteles: 0 };
+    for (const p of productos) {
+      totales.estimado += p.estimado;
+      totales.apartado_pedidos += p.apartado_pedidos;
+      totales.apartado_comandas += p.apartado_comandas;
+      totales.a_preparar += p.a_preparar;
+    }
+    for (const p of pasteles) totales.pasteles += p.cantidad;
+
+    res.json({
+      success: true,
+      fecha,
+      hoy,
+      calendario: {
+        festivo: vars.festivo === 1,
+        nombre_festivo: vars.nombre_festivo,
+        prox_festivo: vars.prox_festivo,
+        dias_festivo: vars.dias_festivo,
+      },
+      modelo: infoModelo(),
+      horizonte: fueraDeRango(fecha),
+      totales,
+      productos,
+      pasteles,
+    });
+  } catch (error) {
+    console.error('Error GET /demanda/plan:', error.message);
+    res.status(500).json({ success: false, message: 'Error al calcular el plan de producción' });
   }
 });
 

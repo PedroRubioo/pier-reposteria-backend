@@ -13,7 +13,7 @@
 const { pool } = require('../config/database');
 const { ZONA_HUEJUTLA, dos, diaHuejutla, sumarDias, diasEntre, restarMeses } = require('./fechasHuejutla');
 
-const PERIODOS = ['mes', 'trimestre', 'anio'];
+const PERIODOS = ['semana', 'mes', 'trimestre', 'anio'];
 
 const CANALES = [
   { canal: 'recoger', etiqueta: 'En línea para recoger' },
@@ -131,7 +131,8 @@ const SQL_PENDIENTES = `
     (SELECT COUNT(*)::int FROM core.tblcomandas WHERE estado = 'activa' AND fecha_entrega = $1::date + 1) AS comandas_manana,
     (SELECT COUNT(*)::int FROM core.tblreembolsos WHERE estado IN ('pendiente', 'en_revision')) AS reembolsos,
     (SELECT COUNT(*)::int FROM core.tblquejas WHERE estado IN ('pendiente', 'en_proceso')) AS quejas,
-    (SELECT COUNT(*)::int FROM core.tblproductos WHERE activo = TRUE AND stock_online = 0) AS productos_agotados,
+    (SELECT COUNT(*)::int FROM core.tblproductos pr JOIN core.tblcategorias ca ON ca.id = pr.categoria_id
+      WHERE pr.activo = TRUE AND ca.activo = TRUE AND pr.stock_online = 0) AS productos_agotados,
     (SELECT COUNT(*)::int FROM core.tblcontacto_mensajes WHERE leido = FALSE) AS mensajes`;
 
 // ── Cálculo ──
@@ -181,11 +182,17 @@ async function cifrasDelTramo(desde, hasta) {
 
 /**
  * Tramo del periodo hasta hoy y el mismo tramo del periodo anterior.
- * Mes y trimestre: el anterior abarca los mismos días transcurridos (del 1
- * al 18 contra del 1 al 18), sin pasar de su último día. Año: del 1 de enero
- * a la misma fecha del año pasado.
+ * Semana (de lunes a hoy): contra los mismos días de la semana pasada, así
+ * un lunes es un solo día contra el lunes anterior. Mes y trimestre: el
+ * anterior abarca los mismos días transcurridos (del 1 al 18 contra del 1
+ * al 18), sin pasar de su último día. Año: del 1 de enero a la misma fecha
+ * del año pasado.
  */
 function tramosDelPeriodo(periodo, hoy) {
+  if (periodo === 'semana') {
+    const lunes = sumarDias(hoy, -((new Date(hoy + 'T00:00:00Z').getUTCDay() + 6) % 7));
+    return { desde: lunes, hasta: hoy, anterior: { desde: sumarDias(lunes, -7), hasta: sumarDias(hoy, -7) } };
+  }
   const [anio, mes] = hoy.split('-').map(Number);
   if (periodo === 'anio') {
     return { desde: `${anio}-01-01`, hasta: hoy, anterior: { desde: `${anio - 1}-01-01`, hasta: restarMeses(hoy, 12) } };
@@ -293,4 +300,4 @@ async function reporteVentas(desde, hasta) {
   };
 }
 
-module.exports = { PERIODOS, resumenDelPeriodo, reporteVentas };
+module.exports = { PERIODOS, dinero, resumenDelPeriodo, reporteVentas };

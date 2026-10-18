@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
 const { registrarAuditoria } = require('../utils/auditoria');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'pierreposteria_secret_key_2025';
@@ -35,6 +36,20 @@ const ROLES_VOZ = ['empleado', 'gerencia', 'direccion_general'];
 // El personal de producción no usa Alexa: la skill publicada no conoce estos
 // roles y los trataría como clientes (podrían hacer pedidos)
 const ROLES_SIN_ALEXA = ['hornos', 'decoracion'];
+
+// Administrar el acceso por voz: gerencia o dirección vigentes (rol leído de
+// la base, no del JWT)
+const ADMIN_VOZ = accesoVigente(['gerencia', 'direccion_general']);
+const MSG_VOZ_SOLO_DIRECCION = 'Solo Dirección General puede cambiar el acceso por voz de Gerencia o Dirección General';
+
+// Con el código y el PIN de una cuenta se inicia sesión por voz como esa
+// persona: gerencia solo administra el de su equipo y el suyo propio
+// (Diseno_Panel_Personal.md §4.9)
+function gerenciaSobreSuperior(req, destino) {
+  return req.usuario.rol === 'gerencia'
+    && ['gerencia', 'direccion_general'].includes(destino.rol)
+    && destino.id !== req.usuario.id;
+}
 
 async function registrarIntento(device_id, codigo_empleado, exito, motivo_fallo) {
   try {
@@ -186,8 +201,7 @@ router.post('/login-empleado', async (req, res) => {
 // PUT /api/auth/asignar-codigo/:usuarioId  (admin)
 // =====================================================================
 router.put('/asignar-codigo/:usuarioId',
-  verifyToken,
-  verifyRole('gerencia', 'direccion_general'),
+  ADMIN_VOZ,
   async (req, res) => {
     const { usuarioId } = req.params;
     const codigo = parseInt(req.body.codigo_empleado);
@@ -206,6 +220,9 @@ router.put('/asignar-codigo/:usuarioId',
       );
       if (!u.rows[0]) {
         return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+      if (gerenciaSobreSuperior(req, u.rows[0])) {
+        return res.status(403).json({ success: false, message: MSG_VOZ_SOLO_DIRECCION });
       }
       if (!ROLES_VOZ.includes(u.rows[0].rol)) {
         return res.status(400).json({
@@ -241,8 +258,7 @@ router.put('/asignar-codigo/:usuarioId',
 // PUT /api/auth/asignar-pin/:usuarioId  (admin)
 // =====================================================================
 router.put('/asignar-pin/:usuarioId',
-  verifyToken,
-  verifyRole('gerencia', 'direccion_general'),
+  ADMIN_VOZ,
   async (req, res) => {
     const { usuarioId } = req.params;
     const { pin } = req.body;
@@ -261,6 +277,9 @@ router.put('/asignar-pin/:usuarioId',
       );
       if (!u.rows[0]) {
         return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+      if (gerenciaSobreSuperior(req, u.rows[0])) {
+        return res.status(403).json({ success: false, message: MSG_VOZ_SOLO_DIRECCION });
       }
       if (!ROLES_VOZ.includes(u.rows[0].rol)) {
         return res.status(400).json({
@@ -295,11 +314,15 @@ router.put('/asignar-pin/:usuarioId',
 // DELETE /api/auth/revocar-acceso-voz/:usuarioId  (admin)
 // =====================================================================
 router.delete('/revocar-acceso-voz/:usuarioId',
-  verifyToken,
-  verifyRole('gerencia', 'direccion_general'),
+  ADMIN_VOZ,
   async (req, res) => {
     const { usuarioId } = req.params;
     try {
+      // El rol del destino decide si gerencia puede revocarlo
+      const destino = await pool.query('SELECT id, rol FROM core.tblusuarios WHERE id = $1', [usuarioId]);
+      if (destino.rows[0] && gerenciaSobreSuperior(req, destino.rows[0])) {
+        return res.status(403).json({ success: false, message: MSG_VOZ_SOLO_DIRECCION });
+      }
       const revocado = await pool.query(
         `UPDATE core.tblusuarios
            SET codigo_empleado = NULL,

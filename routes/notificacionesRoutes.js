@@ -42,11 +42,33 @@ router.put('/leer-todas', verifyToken, async (req, res) => {
   }
 });
 
-// Enviar notificación masiva (empleado+)
+// Valores del enum tipo_notificacion (000_esquema_referencia.sql:225-234 y 002_delivery_enums.sql)
+const TIPOS_AVISO = ['pedido', 'pago', 'promocion', 'sistema', 'aviso', 'recordatorio', 'personalizada', 'alerta'];
+const MAX_TITULO = 120;
+const MAX_MENSAJE = 500;
+/** Id de usuario: entero positivo que cabe en INTEGER */
+const esIdUsuario = (n) => Number.isInteger(n) && n >= 1 && n <= 2147483647;
+
+// Enviar un aviso a un cliente o a todos (empleado+). Esta ruta no pasa por
+// el sanitizador global (middleware/validation.js): el cliente lee "$150" y
+// "18/10" tal cual. El texto se valida aquí, el SQL es parametrizado y la web
+// y la app pintan el aviso como texto.
 router.post('/enviar', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
   try {
-    const { tipo, titulo, mensaje, audiencia, usuario_ids, destinatario_email } = req.body;
-    if (!tipo || !titulo || !mensaje || !audiencia) return res.status(400).json({ success: false, message: 'Tipo, título, mensaje y audiencia son requeridos' });
+    const { tipo, audiencia, usuario_ids, destinatario_email } = req.body;
+    // Avisar a todos los clientes es decisión de gerencia (Diseno_Panel_Personal.md §4.14)
+    if (audiencia === 'todos' && !['gerencia', 'direccion_general'].includes(req.user.rol)) {
+      return res.status(403).json({ success: false, message: 'Los avisos a todos los clientes los envía gerencia' });
+    }
+    const titulo = typeof req.body.titulo === 'string' ? req.body.titulo.trim() : '';
+    const mensaje = typeof req.body.mensaje === 'string' ? req.body.mensaje.trim() : '';
+    const largoTitulo = Array.from(titulo).length;
+    const largoMensaje = Array.from(mensaje).length;
+    if (largoTitulo < 1 || largoTitulo > MAX_TITULO || largoMensaje < 1 || largoMensaje > MAX_MENSAJE) {
+      return res.status(400).json({ success: false, message: `El título (hasta ${MAX_TITULO} caracteres) y el mensaje (hasta ${MAX_MENSAJE}) son obligatorios` });
+    }
+    if (!TIPOS_AVISO.includes(tipo)) return res.status(400).json({ success: false, message: 'Tipo de aviso no válido' });
+    if (!audiencia) return res.status(400).json({ success: false, message: 'Tipo, título, mensaje y audiencia son requeridos' });
 
     let destinatarios = [];
     if (audiencia === 'todos') {
@@ -62,7 +84,9 @@ router.post('/enviar', verifyToken, verifyRole('empleado', 'gerencia', 'direccio
       if (user.rows.length === 0) return res.status(404).json({ success: false, message: 'No existe un cliente activo con ese email' });
       destinatarios = [user.rows[0].id];
     } else if (audiencia === 'individual' && usuario_ids) {
-      destinatarios = Array.isArray(usuario_ids) ? usuario_ids : [usuario_ids];
+      const ids = Array.isArray(usuario_ids) ? usuario_ids : [usuario_ids];
+      if (!ids.every(esIdUsuario)) return res.status(400).json({ success: false, message: 'Los destinatarios deben ser ids de usuario válidos' });
+      destinatarios = [...new Set(ids)];
     }
     if (destinatarios.length === 0) return res.status(400).json({ success: false, message: 'No hay destinatarios para esta notificación' });
 

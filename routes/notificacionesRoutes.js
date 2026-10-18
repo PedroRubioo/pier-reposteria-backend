@@ -12,8 +12,12 @@ router.get('/', verifyToken, async (req, res) => {
       'SELECT * FROM core.tblnotificaciones WHERE usuario_id = $1 ORDER BY created_at DESC LIMIT 50',
       [req.user.userId]
     );
-    const noLeidas = result.rows.filter(n => !n.leida).length;
-    res.json({ success: true, notificaciones: result.rows, no_leidas: noLeidas });
+    // Sin leer: todas, no solo las 50 de la lista
+    const noLeidas = await pool.query(
+      'SELECT COUNT(*)::int AS total FROM core.tblnotificaciones WHERE usuario_id = $1 AND leida IS NOT TRUE',
+      [req.user.userId]
+    );
+    res.json({ success: true, notificaciones: result.rows, no_leidas: noLeidas.rows[0].total });
   } catch (error) {
     console.error('Error GET /notificaciones:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener notificaciones' });

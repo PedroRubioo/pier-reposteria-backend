@@ -6,6 +6,7 @@ const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { accesoVigente } = require('../middleware/usuarioVigente');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
+const { textoLibre, enteroPositivo, esUrlCloudinary, normalizarClave } = require('../utils/validacionCliente');
 
 // Bitácora: la acción depende del estado al que pasa el reembolso
 const ACCION_REEMBOLSO = new Map([
@@ -26,26 +27,111 @@ const PASOS_REEMBOLSO = new Map([
   ['procesado', { desde: ['aprobado'], roles: ['gerencia', 'direccion_general'] }],
 ]);
 
-// Solicitar reembolso (cliente)
+// Motivos (Diseno_Panel_Cliente.md §5.7): la web manda el valor del enum y la
+// app su etiqueta («Producto dañado», «Error en sabor»…). Claves normalizadas
+const MOTIVOS_REEMBOLSO = new Map([
+  ['producto_danado', 'producto_danado'], ['producto danado', 'producto_danado'], ['producto en mal estado', 'producto_danado'],
+  ['no_satisfecho', 'no_satisfecho'], ['calidad no satisfactoria', 'no_satisfecho'], ['no satisfecho con el producto', 'no_satisfecho'],
+  ['pedido_incorrecto', 'pedido_incorrecto'], ['no corresponde al pedido', 'pedido_incorrecto'], ['error en sabor', 'pedido_incorrecto'], ['pedido incorrecto', 'pedido_incorrecto'],
+  ['tardanza', 'tardanza'], ['tardanza en preparacion', 'tardanza'],
+  ['cantidad_incorrecta', 'cantidad_incorrecta'], ['pedido incompleto', 'cantidad_incorrecta'], ['cantidad incorrecta', 'cantidad_incorrecta'],
+  ['otro', 'otro'], ['otro motivo', 'otro'],
+]);
+// Un reembolso vivo por pedido; así se llama cada estado en la web
+const ESTADO_REEMBOLSO_LEGIBLE = new Map([['pendiente', 'pendiente'], ['en_revision', 'en revisión'], ['aprobado', 'aprobado'], ['procesado', 'devuelto']]);
+const MAX_FOTOS_REEMBOLSO = 6;
+const falta = (v) => v === undefined || v === null || v === '';
+
+// Solicitar reembolso (cliente). El pedido se bloquea mientras se revisa que
+// no tenga ya una solicitud viva: dos envíos seguidos no crean dos
 router.post('/', verifyToken, async (req, res) => {
+  const { pedido_id, producto_id, monto, motivo, descripcion, fotos_evidencia } = req.body;
+  if (falta(pedido_id) || falta(monto) || falta(motivo)) return res.status(400).json({ success: false, message: 'Pedido, monto y motivo son requeridos' });
+  const pedidoId = enteroPositivo(pedido_id);
+  if (!pedidoId) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+
+  const etiqueta = typeof motivo === 'string' ? motivo.trim() : '';
+  const motivoEnum = MOTIVOS_REEMBOLSO.get(normalizarClave(etiqueta));
+  if (!motivoEnum) return res.status(400).json({ success: false, message: 'Elige un motivo válido' });
+  const texto = textoLibre(typeof descripcion === 'number' ? String(descripcion) : descripcion, { opcional: true });
+  if (!texto.ok) return res.status(400).json({ success: false, message: 'La descripción no es válida' });
+  // Con la etiqueta de la app, la descripción la conserva tal cual llegó
+  const descripcionFinal = normalizarClave(etiqueta) === motivoEnum ? texto.valor : `«${etiqueta}». ${texto.valor || ''}`.trim();
+
+  let fotos = null;
+  if (!falta(fotos_evidencia)) {
+    if (!Array.isArray(fotos_evidencia) || fotos_evidencia.length > MAX_FOTOS_REEMBOLSO || !fotos_evidencia.every(esUrlCloudinary)) {
+      return res.status(400).json({ success: false, message: `Las fotos deben subirse desde la página (máximo ${MAX_FOTOS_REEMBOLSO})` });
+    }
+    fotos = fotos_evidencia;
+  }
+  let productoId = null;
+  if (!falta(producto_id)) {
+    productoId = enteroPositivo(producto_id);
+    if (!productoId) return res.status(400).json({ success: false, message: 'El producto no está en ese pedido' });
+  }
+  const montoNum = typeof monto === 'number' ? monto : (typeof monto === 'string' && monto.trim() !== '' ? Number(monto) : NaN);
+
+  let client;
   try {
-    const { pedido_id, producto_id, monto, motivo, descripcion, fotos_evidencia } = req.body;
-    if (!pedido_id || !monto || !motivo) return res.status(400).json({ success: false, message: 'Pedido, monto y motivo son requeridos' });
+    client = await pool.connect();
+    await client.query('BEGIN');
+    // Verificar que el pedido pertenece al usuario y ya se entregó o recogió
+    const pedido = await client.query('SELECT id, estado, total FROM core.tblpedidos WHERE id = $1 AND usuario_id = $2 FOR UPDATE', [pedidoId, req.user.userId]);
+    if (pedido.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+    }
+    const { estado, total } = pedido.rows[0];
+    if (estado !== 'completado' && estado !== 'entregado') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: 'Solo puedes pedir reembolso de pedidos entregados o recogidos' });
+    }
 
-    // Verificar que el pedido pertenece al usuario y está completado
-    const pedido = await pool.query('SELECT id, estado FROM core.tblpedidos WHERE id = $1 AND usuario_id = $2', [pedido_id, req.user.userId]);
-    if (pedido.rows.length === 0) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
-    if (pedido.rows[0].estado !== 'completado') return res.status(400).json({ success: false, message: 'Solo se pueden reembolsar pedidos completados' });
+    // Tope: el total del pedido o, si se indica un producto, su subtotal en
+    // el pedido. En centavos: total llega como texto NUMERIC
+    let tope = parseFloat(total);
+    let mensajeTope = `El monto debe ser mayor que 0 y no puede pasar del total del pedido ($${tope.toFixed(2)})`;
+    if (productoId) {
+      const renglon = await client.query(
+        'SELECT COUNT(*)::int AS renglones, COALESCE(SUM(subtotal), 0) AS subtotal FROM core.tblpedido_items WHERE pedido_id = $1 AND producto_id = $2',
+        [pedidoId, productoId]
+      );
+      if (renglon.rows[0].renglones === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, message: 'El producto no está en ese pedido' });
+      }
+      tope = parseFloat(renglon.rows[0].subtotal);
+      mensajeTope = `El monto debe ser mayor que 0 y no puede pasar del subtotal de ese producto ($${tope.toFixed(2)})`;
+    }
+    if (!Number.isFinite(montoNum) || montoNum <= 0 || Math.round(montoNum * 100) > Math.round(tope * 100)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: mensajeTope });
+    }
 
-    const result = await pool.query(
+    const vivo = await client.query(
+      `SELECT estado FROM core.tblreembolsos WHERE pedido_id = $1 AND estado IN ('pendiente', 'en_revision', 'aprobado', 'procesado')
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [pedidoId]
+    );
+    if (vivo.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, message: `Este pedido ya tiene una solicitud de reembolso (${ESTADO_REEMBOLSO_LEGIBLE.get(vivo.rows[0].estado)})` });
+    }
+
+    const result = await client.query(
       `INSERT INTO core.tblreembolsos (pedido_id, producto_id, usuario_id, monto, motivo, descripcion, fotos_evidencia, estado, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'pendiente',NOW(),NOW()) RETURNING *`,
-      [pedido_id, producto_id || null, req.user.userId, monto, motivo, descripcion || null, fotos_evidencia || null]
+      [pedidoId, productoId, req.user.userId, montoNum, motivoEnum, descripcionFinal, fotos]
     );
+    await client.query('COMMIT');
     res.status(201).json({ success: true, reembolso: result.rows[0] });
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Error POST /reembolsos:', error.message);
     res.status(500).json({ success: false, message: 'Error al solicitar reembolso' });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -208,6 +294,17 @@ router.put('/:id', accesoVigente(['empleado', 'gerencia', 'direccion_general']),
     }
 
     res.json({ success: true, reembolso });
+
+    // Marcado como devuelto: el cliente sabe que el dinero ya salió (Diseno_Panel_Cliente.md §5.7)
+    if (procesado && pedidoInfo.rows.length > 0) {
+      const { crearNotificacion } = require('../services/notificacionHelper');
+      crearNotificacion({
+        usuario_id: pedidoInfo.rows[0].usuario_id,
+        tipo: 'pago',
+        titulo: 'Reembolso devuelto',
+        mensaje: `Devolvimos $${parseFloat(reembolso.monto).toFixed(2)} de tu pedido #${pedidoInfo.rows[0].numero} a tu método de pago.`,
+      });
+    }
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Error PUT /reembolsos/:id:', error.message);

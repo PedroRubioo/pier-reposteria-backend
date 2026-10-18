@@ -1,6 +1,7 @@
 // routes/googleAuthRoutes.js
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const passport = require('../config/passport');
 const jwt = require('jsonwebtoken');
 
@@ -141,7 +142,8 @@ router.post('/google/mobile', async (req, res) => {
         // Crear nuevo usuario
         const nombre = given_name || (name ? name.split(' ')[0] : 'Usuario');
         const apellido = family_name || (name ? name.split(' ').slice(1).join(' ') : 'Usuario');
-        const password_hash = await Usuario.hashPassword('google-oauth-' + googleId);
+        // Secreto aleatorio: nadie entra con correo y contraseña a una cuenta de Google
+        const password_hash = await Usuario.hashPassword(crypto.randomBytes(32).toString('hex'));
 
         const insertResult = await pool.query(
           `INSERT INTO core.tblusuarios 

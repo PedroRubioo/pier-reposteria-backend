@@ -2,12 +2,14 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { accesoVigente } = require('../middleware/usuarioVigente');
-const { isValidEmail, isValidName, isValidPhone } = require('../middleware/validation');
+const { isValidEmail, isValidName, isValidPhone, isStrongPassword, getPasswordRequirementsMessage } = require('../middleware/validation');
 const Usuario = require('../models/Usuario');
 const { registrarAuditoria } = require('../utils/auditoria');
+const { telefono10, esUrlCloudinary } = require('../utils/validacionCliente');
 
 const MSG_ULTIMA_DIRECCION = 'Debe quedar al menos una cuenta de Dirección General activa';
 
@@ -132,6 +134,60 @@ router.post('/', GERENCIA_O_DIRECCION, async (req, res) => {
     if (error.code === '23505') return res.status(409).json({ success: false, message: 'Ya existe una cuenta con ese correo' });
     console.error('Error POST /usuarios:', error.message);
     res.status(500).json({ success: false, message: 'Error al dar de alta a la persona' });
+  }
+});
+
+// Cambiar la contraseña propia (Diseno_Panel_Cliente.md §5.11). No sale del
+// sanitizador: la nueva se transforma igual que en el login y el registro.
+// Una contraseña actual equivocada responde 400 (no 401: la sesión sigue).
+// Tras 5 fallos en 15 minutos, la cuenta espera
+const FALLOS_CONTRASENA = new Map(); // usuario_id -> { fallos, desde }
+const VENTANA_FALLOS_CONTRASENA = 15 * 60 * 1000;
+const MAX_FALLOS_CONTRASENA = 5;
+router.put('/perfil/contrasena', verifyToken, async (req, res) => {
+  const userId = Number(req.user.userId);
+  const ahora = Date.now();
+  const registro = FALLOS_CONTRASENA.get(userId);
+  if (registro && ahora - registro.desde >= VENTANA_FALLOS_CONTRASENA) FALLOS_CONTRASENA.delete(userId);
+  else if (registro && registro.fallos >= MAX_FALLOS_CONTRASENA) {
+    return res.status(429).json({ success: false, message: 'Demasiados intentos. Espera 15 minutos.' });
+  }
+
+  const { actual, nueva } = req.body || {};
+  if (typeof actual !== 'string' || typeof nueva !== 'string' || actual === '' || nueva === '') {
+    return res.status(400).json({ success: false, message: 'Escribe tu contraseña actual y la nueva' });
+  }
+  if (!isStrongPassword(nueva)) return res.status(400).json({ success: false, message: getPasswordRequirementsMessage(nueva) });
+  if (nueva === actual) return res.status(400).json({ success: false, message: 'La nueva contraseña debe ser distinta a la actual' });
+
+  try {
+    const cuenta = await pool.query('SELECT nombre, email, password_hash FROM core.tblusuarios WHERE id = $1', [userId]);
+    const u = cuenta.rows[0];
+    if (!u) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    if (!(await bcrypt.compare(actual, u.password_hash))) {
+      const previo = FALLOS_CONTRASENA.get(userId);
+      FALLOS_CONTRASENA.set(userId, previo ? { ...previo, fallos: previo.fallos + 1 } : { fallos: 1, desde: ahora });
+      return res.status(400).json({ success: false, message: 'La contraseña actual no es correcta' });
+    }
+    FALLOS_CONTRASENA.delete(userId);
+
+    const passwordHash = await Usuario.hashPassword(nueva);
+    await pool.query('UPDATE core.tblusuarios SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, userId]);
+    res.json({ success: true, message: 'Contraseña actualizada' });
+
+    // Después de responder: bitácora y correo de aviso
+    registrarAuditoria({ usuario_id: userId, accion: 'Cambió su contraseña', entidad: 'usuario', entidad_id: userId, ip: req.ip });
+    const { enviarEmailNotificacion } = require('../services/notificacionHelper');
+    const fecha = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' });
+    enviarEmailNotificacion({
+      email: u.email,
+      nombre: u.nombre,
+      asunto: 'Contraseña actualizada - Pier Repostería',
+      contenido: `<h2>Contraseña actualizada</h2><p>Tu contraseña fue actualizada exitosamente el <strong>${fecha}</strong>.</p><div class="highlight-box"><strong>Si tú no realizaste este cambio</strong>, contacta al soporte de inmediato respondiendo a este correo.</div>`,
+    }).catch(e => console.error('Correo de cambio de contraseña falló:', e.message));
+  } catch (error) {
+    console.error('Error PUT /usuarios/perfil/contrasena:', error.message);
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Error al cambiar la contraseña' });
   }
 });
 
@@ -320,14 +376,63 @@ router.post('/:id/contrasena-temporal', GERENCIA_O_DIRECCION, async (req, res) =
   }
 });
 
-// Actualizar perfil propio
+// Actualizar perfil propio (sale del sanitizador: se valida campo por campo,
+// Diseno_Panel_Cliente.md §5.11). La app reenvía nombre, apellido y teléfono
+// en cada guardado: solo se valida lo que cambia respecto a lo guardado
+// Letras, marcas, espacio, punto, guion y apóstrofo (también el tipográfico
+// que ponen los teclados del teléfono)
+const NOMBRE_PERSONA = /^[\p{L}\p{M}'’ .-]+$/u;
+const MAX_NOMBRE = 100;
+// null: no cambia; undefined: no es válido; texto: el valor nuevo
+function nombreNuevo(valor, guardado) {
+  if (valor === undefined || valor === null) return null;
+  if (typeof valor !== 'string') return undefined;
+  const limpio = valor.trim();
+  if (limpio === String(guardado ?? '').trim()) return null;
+  return limpio.length >= 1 && Array.from(limpio).length <= MAX_NOMBRE && NOMBRE_PERSONA.test(limpio) ? limpio : undefined;
+}
 router.put('/perfil/actualizar', verifyToken, async (req, res) => {
   try {
-    const { nombre, apellido, telefono, avatar_url } = req.body;
+    const body = req.body || {};
+    const { telefono, avatar_url } = body;
+    const previo = await pool.query('SELECT nombre, apellido, telefono FROM core.tblusuarios WHERE id = $1', [req.user.userId]);
+    const guardado = previo.rows[0];
+    if (!guardado) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+
+    const nombre = nombreNuevo(body.nombre, guardado.nombre);
+    if (nombre === undefined) return res.status(400).json({ success: false, message: 'Escribe tu nombre solo con letras' });
+    const apellido = nombreNuevo(body.apellido, guardado.apellido);
+    if (apellido === undefined) return res.status(400).json({ success: false, message: 'Escribe tu apellido solo con letras' });
+
+    // Teléfono: null o ausente no cambia; "" lo borra; otro distinto al guardado, 10 dígitos
+    let telefonoNuevo = null;
+    let borrarTelefono = false;
+    if (telefono !== undefined && telefono !== null) {
+      if (typeof telefono === 'string' && telefono.trim() === '') borrarTelefono = true;
+      else if (String(telefono).trim() !== String(guardado.telefono ?? '').trim()) {
+        const tel = telefono10(telefono);
+        if (!tel.ok || tel.valor === null) return res.status(400).json({ success: false, message: 'El teléfono debe tener 10 dígitos' });
+        telefonoNuevo = tel.valor;
+      }
+    }
+
+    // Foto: null la borra; si no, una URL de la cuenta de Cloudinary del proyecto
+    const traeAvatar = Object.prototype.hasOwnProperty.call(body, 'avatar_url');
+    const borrarAvatar = traeAvatar && avatar_url === null;
+    let avatarNuevo = null;
+    if (traeAvatar && avatar_url !== null) {
+      if (!esUrlCloudinary(avatar_url) || avatar_url.length > 500) return res.status(400).json({ success: false, message: 'La foto debe subirse desde la página' });
+      avatarNuevo = avatar_url;
+    }
+
     const result = await pool.query(
-      `UPDATE core.tblusuarios SET nombre=COALESCE($1,nombre), apellido=COALESCE($2,apellido), telefono=COALESCE($3,telefono), avatar_url=COALESCE($4,avatar_url), updated_at=NOW()
-       WHERE id=$5 RETURNING id, nombre, apellido, email, telefono, avatar_url, rol`,
-      [nombre, apellido, telefono, avatar_url, req.user.userId]
+      `UPDATE core.tblusuarios
+          SET nombre = COALESCE($1, nombre), apellido = COALESCE($2, apellido),
+              telefono = CASE WHEN $6::boolean THEN NULL ELSE COALESCE($3, telefono) END,
+              avatar_url = CASE WHEN $7::boolean THEN NULL ELSE COALESCE($4, avatar_url) END,
+              updated_at = NOW()
+        WHERE id = $5 RETURNING id, nombre, apellido, email, telefono, avatar_url, rol`,
+      [nombre, apellido, telefonoNuevo, avatarNuevo, req.user.userId, borrarTelefono, borrarAvatar]
     );
     res.json({ success: true, user: result.rows[0] });
   } catch (error) {

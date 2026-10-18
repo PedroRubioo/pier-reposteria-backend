@@ -16,6 +16,7 @@ class Usuario {
     this.email_verificado = data.email_verificado || false;
     this.google_id = data.google_id;
     this.ultimo_acceso = data.ultimo_acceso;
+    this.avatar_url = data.avatar_url ?? null;
   }
 
   // Comparar contraseña (bcrypt)
@@ -42,7 +43,8 @@ class Usuario {
       emailVerificado: this.email_verificado,
       googleId: this.google_id,
       fechaRegistro: this.created_at,
-      ultimoAcceso: this.ultimo_acceso
+      ultimoAcceso: this.ultimo_acceso,
+      avatar_url: this.avatar_url
     };
   }
 

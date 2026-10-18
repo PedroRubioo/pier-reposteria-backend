@@ -6,116 +6,55 @@ const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { calcularRiesgo } = require('../utils/riesgoCancelacion');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
+const { enteroPositivo } = require('../utils/validacionCliente');
 
-function generarNumeroPedido() {
-  const fecha = new Date();
-  const y = fecha.getFullYear().toString().slice(-2);
-  const m = String(fecha.getMonth() + 1).padStart(2, '0');
-  const d = String(fecha.getDate()).padStart(2, '0');
-  const rand = Math.floor(1000 + Math.random() * 9000);
-  return `PIER-${y}${m}${d}-${rand}`;
-}
-
-// ── Crear pedido (desde carrito) ──
-router.post('/', verifyToken, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const userId = req.user.userId;
-    const { notas, horario_recogida, metodo_pago } = req.body;
-    await client.query('BEGIN');
-    const carrito = await client.query(`SELECT ci.*, p.nombre, p.precio_chico, p.precio_grande, p.stock_online, p.activo FROM core.tblcarrito_items ci JOIN core.tblproductos p ON ci.producto_id = p.id WHERE ci.usuario_id = $1`, [userId]);
-    if (carrito.rows.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: 'El carrito está vacío' }); }
-    let total = 0;
-    const items = [];
-    for (const item of carrito.rows) {
-      if (!item.activo) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}" ya no está disponible` }); }
-      if (item.stock_online === 0) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}" está agotado` }); }
-      if (item.stock_online < item.cantidad) { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `"${item.nombre}": solo quedan ${item.stock_online} unidades` }); }
-      const precio = (item.tamano === 'grande' && item.precio_grande) ? parseFloat(item.precio_grande) : parseFloat(item.precio_chico);
-      const subtotal = precio * item.cantidad;
-      total += subtotal;
-      items.push({ producto_id: item.producto_id, nombre: item.nombre, cantidad: item.cantidad, tamano: item.tamano, precio_unitario: precio, subtotal });
-    }
-    const numero = generarNumeroPedido();
-    // El stock se validó y descontó aquí mismo: el producto ya está hecho
-    // y apartado, así que el pedido nace "listo" (solo falta pagar al
-    // recogerlo). "pendiente" queda exclusivo de los programados por confirmar.
-    const pedidoResult = await client.query(`INSERT INTO core.tblpedidos (numero, usuario_id, total, estado, notas, horario_recogida, metodo_pago, created_at, updated_at) VALUES ($1,$2,$3,'listo',$4,$5,$6,NOW(),NOW()) RETURNING *`, [numero, userId, total, notas || null, horario_recogida || null, metodo_pago || null]);
-    const pedido = pedidoResult.rows[0];
-    for (const item of items) {
-      // Registrar el descuento real por línea: es lo que se repone al cancelar
-      const stockResult = await client.query(
-        `UPDATE core.tblproductos p
-         SET stock_online = GREATEST(p.stock_online - $1, 0), updated_at = NOW()
-         FROM (SELECT id, stock_online AS stock_anterior FROM core.tblproductos WHERE id = $2 FOR UPDATE) prev
-         WHERE p.id = prev.id
-         RETURNING p.stock_online, prev.stock_anterior`,
-        [item.cantidad, item.producto_id]
-      );
-      const stockDescontado = stockResult.rows.length > 0
-        ? stockResult.rows[0].stock_anterior - stockResult.rows[0].stock_online
-        : 0;
-      await client.query(`INSERT INTO core.tblpedido_items (pedido_id, producto_id, nombre_producto, cantidad, tamano, precio_unitario, subtotal, stock_descontado) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [pedido.id, item.producto_id, item.nombre, item.cantidad, item.tamano, item.precio_unitario, item.subtotal, stockDescontado]);
-    }
-    await client.query('DELETE FROM core.tblcarrito_items WHERE usuario_id = $1', [userId]);
-    await client.query(`INSERT INTO core.tblpagos (pedido_id, monto_subtotal, monto_total, estado, created_at) VALUES ($1,$2,$3,'pendiente',NOW())`, [pedido.id, total, total]);
-    await client.query('COMMIT');
-
-    // Notificación: pedido creado + email
-    const { notificarConEmail } = require('../services/notificacionHelper');
-    const userData = await pool.query('SELECT nombre, email FROM core.tblusuarios WHERE id = $1', [userId]);
-    if (userData.rows.length > 0) {
-      const u = userData.rows[0];
-
-      // 🔒 SEGURIDAD: Sanitizar datos dinámicos antes de insertarlos en HTML
-      const safeNumero = he.escape(String(numero));
-      const safeTotal = he.escape(total.toFixed(2));
-      const safeItemsTexto = he.escape(items.map(i => `${i.nombre} x${i.cantidad}`).join(', '));
-      const safeHorario = horario_recogida ? he.escape(String(horario_recogida)) : null;
-
-      await notificarConEmail({
-        usuario_id: userId,
-        tipo: 'pedido',
-        titulo: '¡Pedido recibido!',
-        mensaje: `Tu pedido #${numero} por $${total.toFixed(2)} está listo. Pasa a recogerlo cuando gustes y paga en tienda.`,
-        email: u.email,
-        nombre: u.nombre,
-        asunto: `🍰 Pedido #${safeNumero} recibido — Pier Repostería`,
-        contenidoHtml: `
-          <h2>¡Tu pedido ha sido recibido!</h2>
-          <div class="highlight-box">
-            <p><strong>Pedido:</strong> #${safeNumero}</p>
-            <p><strong>Total:</strong> $${safeTotal} MXN</p>
-            <p><strong>Productos:</strong> ${safeItemsTexto}</p>
-            ${safeHorario ? `<p><strong>Horario de recogida:</strong> ${safeHorario}</p>` : ''}
-          </div>
-          <p>Tu pedido ya está listo: pasa a recogerlo a Sucursal Principal, Huejutla de Reyes, y paga ahí mismo. 🧁</p>
-          <p><strong>Recuerda:</strong> recoge tu pedido en Sucursal Principal, Huejutla de Reyes.</p>
-        `
-      });
-    }
-
-    res.status(201).json({ success: true, pedido, items, message: `Pedido ${numero} creado` });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Error POST /pedidos:', error.message);
-    res.status(500).json({ success: false, message: 'Error al crear pedido' });
-  } finally { client.release(); }
+// ── Crear pedido sin pagar: retirado ──
+// Los pedidos se crean al pagar en línea (POST /api/pagos/confirmar). Esta
+// ruta creaba pedidos "listo" sin cobro que apartaban existencias; ni la web,
+// ni la app, ni la skill la usan (Diseno_Panel_Cliente.md §5.6).
+router.post('/', verifyToken, (req, res) => {
+  res.status(410).json({ success: false, message: 'Los pedidos se crean al pagar en línea' });
 });
 
+// Estados de un pedido que sigue en curso (los mismos que la web, §4.0)
+const ESTADOS_EN_CURSO = ['pendiente', 'en_preparacion', 'listo', 'asignado', 'en_camino', 'entrega_fallida'];
+
 // ── Mis pedidos (cliente) ──
+// ?vista=en_curso: solo los que siguen en curso (Inicio y refrescos). Sin el
+// parámetro, todos, como siempre (la app y la skill no lo mandan). Cada fila
+// suma la foto y el id de sus productos, su entrega más reciente y su
+// reembolso más reciente
 router.get('/mis-pedidos', verifyToken, async (req, res) => {
   try {
+    const { vista } = req.query;
+    if (vista !== undefined && vista !== 'en_curso') return res.status(400).json({ success: false, message: 'Vista no válida' });
     const result = await pool.query(`
-      SELECT p.*, 
-        (SELECT json_agg(json_build_object('nombre', pi.nombre_producto, 'cantidad', pi.cantidad, 'tamano', pi.tamano, 'precio_unitario', pi.precio_unitario, 'subtotal', pi.subtotal))
-         FROM core.tblpedido_items pi WHERE pi.pedido_id = p.id) AS items,
-        pg.estado AS estado_pago, pg.stripe_payment_id
+      SELECT p.*,
+        (SELECT json_agg(json_build_object('nombre', pi.nombre_producto, 'cantidad', pi.cantidad, 'tamano', pi.tamano,
+                'precio_unitario', pi.precio_unitario, 'subtotal', pi.subtotal,
+                'producto_id', pi.producto_id, 'imagen_url', pr.imagen_url) ORDER BY pi.id)
+           FROM core.tblpedido_items pi LEFT JOIN core.tblproductos pr ON pr.id = pi.producto_id
+          WHERE pi.pedido_id = p.id) AS items,
+        pg.estado AS estado_pago, pg.stripe_payment_id,
+        ent.entrega, rb.reembolso
       FROM core.tblpedidos p
       LEFT JOIN core.tblpagos pg ON pg.pedido_id = p.id
+      LEFT JOIN LATERAL (
+        SELECT json_build_object('estado', e.estado,
+                 'repartidor', TRIM(u.nombre || ' ' || LEFT(COALESCE(u.apellido, ''), 1) || '.'),
+                 'asignado_at', e.asignado_at AT TIME ZONE 'UTC', 'salio_at', e.salio_at AT TIME ZONE 'UTC',
+                 'finalizado_at', e.finalizado_at AT TIME ZONE 'UTC',
+                 'motivo_fallo', e.motivo_fallo, 'recibio_nombre', e.recibio_nombre, 'evidencia_url', e.evidencia_url) AS entrega
+          FROM core.tblentregas e JOIN core.tblusuarios u ON u.id = e.repartidor_id
+         WHERE e.pedido_id = p.id ORDER BY e.id DESC LIMIT 1) ent ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT json_build_object('id', r.id, 'estado', r.estado, 'monto', r.monto) AS reembolso
+          FROM core.tblreembolsos r WHERE r.pedido_id = p.id
+         ORDER BY r.created_at DESC, r.id DESC LIMIT 1) rb ON TRUE
       WHERE p.usuario_id = $1
+        AND ($2::text IS NULL OR p.estado::text = ANY($3::text[]))
       ORDER BY p.created_at DESC
-    `, [req.user.userId]);
+    `, [req.user.userId, vista === 'en_curso' ? vista : null, ESTADOS_EN_CURSO]);
     res.json({ success: true, pedidos: result.rows });
   } catch (error) {
     console.error('Error GET /pedidos/mis-pedidos:', error.message);
@@ -124,18 +63,23 @@ router.get('/mis-pedidos', verifyToken, async (req, res) => {
 });
 
 // ── Productos comprados anteriormente (para "Pide de nuevo") ──
+// La compra más reciente de cada producto, de la más nueva a la más vieja
 router.get('/productos-comprados', verifyToken, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT DISTINCT ON (pi.producto_id)
-        pi.producto_id AS id, pi.nombre_producto AS nombre, pi.tamano, pi.precio_unitario,
-        p.imagen_url, p.precio_chico, c.nombre AS categoria
-      FROM core.tblpedido_items pi
-      JOIN core.tblpedidos ped ON pi.pedido_id = ped.id
-      LEFT JOIN core.tblproductos p ON pi.producto_id = p.id
-      LEFT JOIN core.tblcategorias c ON p.categoria_id = c.id
-      WHERE ped.usuario_id = $1 AND ped.estado IN ('completado', 'entregado')
-      ORDER BY pi.producto_id, ped.created_at DESC
+      SELECT * FROM (
+        SELECT DISTINCT ON (pi.producto_id)
+               pi.producto_id AS id, pi.nombre_producto AS nombre, pi.tamano, pi.precio_unitario,
+               p.imagen_url, p.precio_chico, p.precio_grande, p.activo, p.stock_online,
+               c.nombre AS categoria, ped.created_at AS ultima_compra
+          FROM core.tblpedido_items pi
+          JOIN core.tblpedidos ped ON pi.pedido_id = ped.id
+          LEFT JOIN core.tblproductos p ON pi.producto_id = p.id
+          LEFT JOIN core.tblcategorias c ON p.categoria_id = c.id
+         WHERE ped.usuario_id = $1 AND ped.estado IN ('completado', 'entregado')
+         ORDER BY pi.producto_id, ped.created_at DESC, pi.id DESC
+      ) ultimos
+      ORDER BY ultimos.ultima_compra DESC
       LIMIT 5
     `, [req.user.userId]);
     res.json({ success: true, productos: result.rows });
@@ -399,7 +343,7 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       en_preparacion: { titulo: 'Pedido en preparación', mensaje: `Tu pedido #${pedido.numero} ha comenzado a prepararse.`, tipo: 'pedido' },
       listo: esDomicilio
         ? { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo. Pronto saldrá en camino a tu domicilio.`, tipo: 'pedido' }
-        : { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo para recoger en Sucursal Principal.`, tipo: 'pedido' },
+        : { titulo: '¡Tu pedido está listo!', mensaje: `Tu pedido #${pedido.numero} está listo para recoger.`, tipo: 'pedido' },
       completado: { titulo: 'Pedido completado', mensaje: `Tu pedido #${pedido.numero} ha sido entregado. ¡Gracias por tu compra!`, tipo: 'pedido' },
       // Con reembolso no se promete la devolución: la decide gerencia
       cancelado: {
@@ -434,7 +378,6 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
               <div class="highlight-box">
                 <p><strong>Pedido:</strong> #${safeNumero}</p>
                 <p><strong>Total:</strong> $${safeTotal} MXN</p>
-                <p><strong>Recoger en:</strong> Sucursal Principal — Huejutla de Reyes</p>
               </div>
               <p>Pasa a recoger tu pedido en horario de atención. ¡Te esperamos!</p>
             `
@@ -588,16 +531,20 @@ router.put('/:id/rechazar', verifyToken, verifyRole('empleado', 'gerencia', 'dir
 // ── Cancelación por el propio cliente ──
 // Permitida solo mientras ningún repartidor haya aceptado el pedido:
 // estados pendiente o listo (al aceptar pasa a 'asignado' y ya no aplica).
-// Repone el stock descontado y genera la solicitud de reembolso automática.
+// Repone el stock descontado y, si el pedido se pagó en línea y no tiene ya
+// un reembolso vivo, genera la solicitud de reembolso automática.
 router.put('/:id/cancelar', verifyToken, async (req, res) => {
-  const client = await pool.connect();
+  const pedidoId = enteroPositivo(req.params.id);
+  if (!pedidoId) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
     const result = await client.query(
       `SELECT p.*, u.nombre AS cliente_nombre, u.email AS cliente_email
        FROM core.tblpedidos p JOIN core.tblusuarios u ON u.id = p.usuario_id
        WHERE p.id = $1 FOR UPDATE`,
-      [req.params.id]
+      [pedidoId]
     );
     if (result.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Pedido no encontrado' }); }
     const p = result.rows[0];
@@ -636,56 +583,73 @@ router.put('/:id/cancelar', verifyToken, async (req, res) => {
     );
     await client.query('UPDATE core.tblpedido_items SET stock_descontado = 0 WHERE pedido_id = $1', [p.id]);
 
-    // Reembolso automático: el cliente ya pagó en línea
-    await client.query(
-      `INSERT INTO core.tblreembolsos (pedido_id, producto_id, usuario_id, monto, motivo, descripcion, fotos_evidencia, estado, created_at, updated_at)
-       VALUES ($1, NULL, $2, $3, 'otro', $4, NULL, 'pendiente', NOW(), NOW())`,
-      [p.id, p.usuario_id, p.total, `Pedido #${p.numero} cancelado por el cliente antes de la entrega`]
+    // Reembolso automático: solo si se cobró en línea y no hay ya uno vivo
+    // (la descripción la reconoce GET /api/reembolsos como automática)
+    const cobro = await client.query(
+      `SELECT EXISTS (SELECT 1 FROM core.tblpagos WHERE pedido_id = $1 AND estado = 'pagado') AS pagado,
+              EXISTS (SELECT 1 FROM core.tblreembolsos WHERE pedido_id = $1
+                       AND estado IN ('pendiente', 'en_revision', 'aprobado', 'procesado')) AS con_reembolso`,
+      [p.id]
     );
+    let reembolso = null;
+    if (cobro.rows[0].pagado && !cobro.rows[0].con_reembolso) {
+      const nuevo = await client.query(
+        `INSERT INTO core.tblreembolsos (pedido_id, producto_id, usuario_id, monto, motivo, descripcion, fotos_evidencia, estado, created_at, updated_at)
+         VALUES ($1, NULL, $2, $3, 'otro', $4, NULL, 'pendiente', NOW(), NOW())
+         RETURNING id, monto`,
+        [p.id, p.usuario_id, p.total, `Pedido #${p.numero} cancelado por el cliente antes de la entrega`]
+      );
+      reembolso = nuevo.rows[0];
+    }
     await client.query('COMMIT');
+    client.release();
+    client = null;
 
-    registrarAuditoria({ usuario_id: p.usuario_id, accion: 'Cliente canceló su pedido', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · $${parseFloat(p.total).toFixed(2)}`, ip: req.ip });
+    const totalTxt = parseFloat(p.total).toFixed(2);
+    const montoTxt = reembolso ? parseFloat(reembolso.monto).toFixed(2) : null;
+    res.json(reembolso
+      ? { success: true, message: `Pedido cancelado; generamos tu solicitud de reembolso por $${montoTxt}`, reembolso_generado: true }
+      : { success: true, message: 'Pedido cancelado', reembolso_generado: false });
+
+    // Después de responder: bitácora, aviso y correo al cliente, aviso al personal
+    registrarAuditoria({ usuario_id: p.usuario_id, accion: 'Cliente canceló su pedido', entidad: 'pedido', entidad_id: p.id, detalles: `#${p.numero} · $${totalTxt}`, ip: req.ip });
     const { notificarConEmail, crearNotificacion } = require('../services/notificacionHelper');
     const safeNumero = he.escape(String(p.numero));
-    const totalTxt = parseFloat(p.total).toFixed(2);
-
-    // Confirmación al cliente (notificación + correo)
-    await notificarConEmail({
-      usuario_id: p.usuario_id,
-      tipo: 'pedido',
-      titulo: 'Tu pedido fue cancelado',
-      mensaje: `Cancelaste tu pedido #${p.numero}. Tu pago de $${totalTxt} será reembolsado; ya generamos la solicitud.`,
-      email: p.cliente_email,
-      nombre: p.cliente_nombre,
-      asunto: `Pedido #${safeNumero} cancelado — Pier Repostería`,
-      contenidoHtml: `
-        <h2>Pedido cancelado</h2>
-        <div class="highlight-box">
-          <p><strong>Pedido:</strong> #${safeNumero}</p>
-          <p><strong>Monto a reembolsar:</strong> $${he.escape(totalTxt)} MXN</p>
-        </div>
-        <p>Cancelaste tu pedido a tiempo y ya generamos la solicitud de reembolso; te avisaremos cuando se procese.</p>
-        <p>¡Esperamos consentirte pronto! 🧁</p>
-      `,
-    });
-
-    // Aviso al personal para que no lo prepare ni lo despache
+    const sobreReembolso = 'Generamos tu solicitud de reembolso; la sucursal la revisa y te avisamos.';
     try {
+      await notificarConEmail({
+        usuario_id: p.usuario_id,
+        tipo: 'pedido',
+        titulo: 'Tu pedido fue cancelado',
+        mensaje: reembolso ? `Cancelaste tu pedido #${p.numero}. ${sobreReembolso}` : `Cancelaste tu pedido #${p.numero}.`,
+        email: p.cliente_email,
+        nombre: p.cliente_nombre,
+        asunto: `Pedido #${safeNumero} cancelado — Pier Repostería`,
+        contenidoHtml: `
+          <h2>Pedido cancelado</h2>
+          <div class="highlight-box">
+            <p><strong>Pedido:</strong> #${safeNumero}</p>
+            ${reembolso ? `<p><strong>Solicitud de reembolso:</strong> $${he.escape(montoTxt)} MXN</p>` : ''}
+          </div>
+          ${reembolso ? `<p>${sobreReembolso}</p>` : ''}
+          <p>¡Esperamos consentirte pronto! 🧁</p>
+        `,
+      });
+
+      // Aviso al personal para que no lo prepare ni lo despache
       const personal = await pool.query(`SELECT id FROM core.tblusuarios WHERE rol IN ('empleado', 'gerencia') AND activo = true`);
       await Promise.all(personal.rows.map(u => crearNotificacion({
         usuario_id: u.id,
         tipo: 'alerta',
         titulo: 'Pedido cancelado por el cliente',
-        mensaje: `El cliente canceló el pedido #${p.numero} ($${totalTxt}) antes de ser tomado por un repartidor. Se generó su reembolso.`,
+        mensaje: `El cliente canceló el pedido #${p.numero} ($${totalTxt}) antes de ser tomado por un repartidor.${reembolso ? ' Se generó su solicitud de reembolso.' : ''}`,
       })));
-    } catch (e) { console.error('Aviso al personal falló:', e.message); }
-
-    res.json({ success: true, message: 'Pedido cancelado; tu reembolso ya está en proceso' });
+    } catch (e) { console.error('Avisos de la cancelación fallaron:', e.message); }
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Error PUT /pedidos/:id/cancelar:', error.message);
-    res.status(500).json({ success: false, message: 'Error al cancelar el pedido' });
-  } finally { client.release(); }
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Error al cancelar el pedido' });
+  } finally { if (client) client.release(); }
 });
 
 module.exports = router;

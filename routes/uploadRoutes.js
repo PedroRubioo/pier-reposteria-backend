@@ -31,6 +31,8 @@ try {
   console.warn('⚠️  Cloudinary no disponible. Instala: npm install cloudinary multer streamifier');
 }
 
+const MSG_TIPO_NO_PERMITIDO = 'Solo se permiten imágenes JPEG, PNG, WebP o GIF';
+
 // Multer en memoria (no guarda archivos en disco)
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -42,10 +44,27 @@ const upload = multer({
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Solo se permiten imágenes (JPEG, PNG, WebP, GIF)'));
+      const error = new Error(MSG_TIPO_NO_PERMITIDO);
+      error.code = 'TIPO_NO_PERMITIDO';
+      cb(error);
     }
   }
 });
+
+// upload.single con sus errores en JSON (Diseno_Panel_Cliente.md §5.12): sin
+// esto, el archivo grande o de otro tipo terminaba en el 500 del servidor
+function subirUna(campo) {
+  const recibir = upload.single(campo);
+  return (req, res, next) => recibir(req, res, (error) => {
+    if (!error) return next();
+    if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ success: false, message: 'La foto pesa más de 5 MB' });
+    if (error.code === 'TIPO_NO_PERMITIDO') return res.status(400).json({ success: false, message: MSG_TIPO_NO_PERMITIDO });
+    return next(error);
+  });
+}
+
+// Lo que un cliente sube: su foto de perfil o la evidencia de un reembolso
+const TIPOS_CLIENTE = ['perfil', 'reembolso'];
 
 // ════════════════════════════════════════════
 // HELPER: Subir buffer a Cloudinary
@@ -72,17 +91,21 @@ function uploadToCloudinary(buffer, options = {}) {
 // ════════════════════════════════════════════
 // SUBIR IMAGEN ÚNICA (productos, categorías, perfil)
 // ════════════════════════════════════════════
-router.post('/imagen', verifyToken, upload.single('imagen'), async (req, res) => {
+router.post('/imagen', verifyToken, subirUna('imagen'), async (req, res) => {
   try {
     if (!cloudinary) {
       return res.status(503).json({ success: false, message: 'Cloudinary no está configurado' });
+    }
+
+    const { tipo } = req.body; // 'producto', 'categoria', 'perfil', 'reembolso', 'entrega'…
+    if (req.user.rol === 'cliente' && !TIPOS_CLIENTE.includes(tipo)) {
+      return res.status(400).json({ success: false, message: 'Tipo de imagen no válido' });
     }
 
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No se envió ninguna imagen' });
     }
 
-    const { tipo } = req.body; // 'producto', 'categoria', 'perfil', 'resena'
     const folder = `pier-reposteria/${tipo || 'general'}`;
 
     const result = await uploadToCloudinary(req.file.buffer, { folder });

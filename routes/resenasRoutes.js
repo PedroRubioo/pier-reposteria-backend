@@ -4,6 +4,7 @@ const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
+const { textoLibre, enteroPositivo } = require('../utils/validacionCliente');
 
 const PALABRAS_INAPROPIADAS = ['mierda','puta','puto','pendejo','pendeja','idiota','estupido','estúpido','cabron','cabrón','chinga','verga','culo','joder','jodido','mamada','pinche','culero','culera','baboso','babosa','imbecil','imbécil','tarado','tarada','zorra','bastardo','maldito','maldita','carajo','coño','huevon','huevón','maricon','maricón','perra','perro hijue','gonorrea','malparido','malparida','hp','hdp','wtf','ctm','ptm'];
 
@@ -66,37 +67,59 @@ router.get('/producto/:productoId', async (req, res) => {
   }
 });
 
+// Calificación, título y comentario de una reseña (Diseno_Panel_Cliente.md
+// §5.8). El título cabe en varchar(100); el comentario no tiene tope (la app
+// no lo limita). Devuelve el mensaje del primer campo inválido
+function validarResena({ rating, titulo, comentario }) {
+  const calificacion = enteroPositivo(rating);
+  if (!calificacion || calificacion > 5) return { error: 'La calificación debe ser un número entero de 1 a 5' };
+  const tituloLimpio = textoLibre(titulo, { max: 100, opcional: true });
+  if (!tituloLimpio.ok) return { error: 'El título puede tener hasta 100 caracteres' };
+  const comentarioLimpio = textoLibre(comentario, { min: 1 });
+  if (!comentarioLimpio.ok) return { error: 'Escribe tu opinión' };
+  return { calificacion, titulo: tituloLimpio.valor, comentario: comentarioLimpio.valor };
+}
+const tieneInapropiado = (titulo, comentario) => {
+  const texto = `${titulo || ''} ${comentario}`.toLowerCase();
+  return PALABRAS_INAPROPIADAS.some(p => texto.includes(p));
+};
+
 // Crear reseña (cliente)
 router.post('/', verifyToken, async (req, res) => {
   try {
-    const { producto_id, rating, titulo, comentario, fotos } = req.body;
-    if (!producto_id || !rating || !comentario) return res.status(400).json({ success: false, message: 'Producto, rating y comentario son requeridos' });
-    if (rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'Rating debe ser entre 1 y 5' });
+    const { producto_id, fotos } = req.body;
+    const productoId = enteroPositivo(producto_id);
+    if (!productoId) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+    const datos = validarResena(req.body);
+    if (datos.error) return res.status(400).json({ success: false, message: datos.error });
+    const { calificacion, titulo, comentario } = datos;
 
-    // Verificar que el usuario compró el producto
+    const producto = await pool.query('SELECT 1 FROM core.tblproductos WHERE id = $1', [productoId]);
+    if (producto.rows.length === 0) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    // Verificar que el usuario compró el producto (recogido o entregado)
     const compro = await pool.query(
       `SELECT 1 FROM core.tblpedido_items pi
        JOIN core.tblpedidos p ON pi.pedido_id = p.id
-       WHERE p.usuario_id = $1 AND pi.producto_id = $2 AND p.estado = 'completado' LIMIT 1`,
-      [req.user.userId, producto_id]
+       WHERE p.usuario_id = $1 AND pi.producto_id = $2 AND p.estado IN ('completado', 'entregado') LIMIT 1`,
+      [req.user.userId, productoId]
     );
     const verificada = compro.rows.length > 0;
 
     // Verificar que no haya reseñado ya
     const yaReseno = await pool.query(
-      'SELECT id FROM core.tblresenas WHERE usuario_id = $1 AND producto_id = $2', [req.user.userId, producto_id]
+      'SELECT id FROM core.tblresenas WHERE usuario_id = $1 AND producto_id = $2', [req.user.userId, productoId]
     );
     if (yaReseno.rows.length > 0) return res.status(400).json({ success: false, message: 'Ya dejaste una reseña para este producto' });
 
-    const textoCompleto = `${titulo || ''} ${comentario}`.toLowerCase();
-    const contieneInapropiado = PALABRAS_INAPROPIADAS.some(p => textoCompleto.includes(p));
-    const auto_aprobada = !contieneInapropiado && rating >= 4;
+    const contieneInapropiado = tieneInapropiado(titulo, comentario);
+    const auto_aprobada = !contieneInapropiado && calificacion >= 4;
     const estado = auto_aprobada ? 'aprobada' : 'pendiente';
 
     const result = await pool.query(
       `INSERT INTO core.tblresenas (producto_id, usuario_id, rating, titulo, comentario, fotos, estado, auto_aprobada, verificada, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW()) RETURNING *`,
-      [producto_id, req.user.userId, rating, titulo || null, comentario, fotos ? JSON.stringify(fotos) : null, estado, auto_aprobada, verificada]
+      [productoId, req.user.userId, calificacion, titulo, comentario, fotos ? JSON.stringify(fotos) : null, estado, auto_aprobada, verificada]
     );
     res.status(201).json({
       success: true,
@@ -106,6 +129,10 @@ router.post('/', verifyToken, async (req, res) => {
         : (auto_aprobada ? 'Reseña publicada' : 'Reseña en revisión')
     });
   } catch (error) {
+    // Doble envío: el segundo choca con el índice único (producto, usuario)
+    if (error.code === '23505' && error.constraint === 'tblresenas_producto_id_usuario_id_key') {
+      return res.status(400).json({ success: false, message: 'Ya dejaste una reseña para este producto' });
+    }
     console.error('Error POST /resenas:', error.message);
     res.status(500).json({ success: false, message: 'Error al crear reseña' });
   }
@@ -127,37 +154,92 @@ router.get('/mis-resenas', verifyToken, async (req, res) => {
   }
 });
 
-// Dar like a reseña
-router.post('/:id/like', verifyToken, async (req, res) => {
+// Reseñas que el usuario marcó como útiles (opcional: de un producto)
+router.get('/mis-utiles', verifyToken, async (req, res) => {
   try {
-    const existe = await pool.query('SELECT id FROM core.tblresena_likes WHERE resena_id = $1 AND usuario_id = $2', [req.params.id, req.user.userId]);
-    if (existe.rows.length > 0) {
-      await pool.query('DELETE FROM core.tblresena_likes WHERE resena_id = $1 AND usuario_id = $2', [req.params.id, req.user.userId]);
-      await pool.query('UPDATE core.tblresenas SET util_count = GREATEST(util_count - 1, 0), updated_at = NOW() WHERE id = $1', [req.params.id]);
-      return res.json({ success: true, liked: false, message: 'Like removido' });
+    const { producto_id } = req.query;
+    let productoId = null;
+    if (producto_id !== undefined && producto_id !== '') {
+      productoId = enteroPositivo(producto_id);
+      if (!productoId) return res.status(400).json({ success: false, message: 'Producto no válido' });
     }
-    await pool.query('INSERT INTO core.tblresena_likes (resena_id, usuario_id, created_at) VALUES ($1,$2,NOW())', [req.params.id, req.user.userId]);
-    await pool.query('UPDATE core.tblresenas SET util_count = util_count + 1, updated_at = NOW() WHERE id = $1', [req.params.id]);
-
-    // Notificar al autor de la reseña que alguien le dio like
-    const { crearNotificacion } = require('../services/notificacionHelper');
-    const resenaData = await pool.query(
-      `SELECT r.usuario_id, p.nombre AS producto_nombre FROM core.tblresenas r JOIN core.tblproductos p ON r.producto_id = p.id WHERE r.id = $1`,
-      [req.params.id]
+    const result = await pool.query(
+      `SELECT l.resena_id FROM core.tblresena_likes l JOIN core.tblresenas r ON r.id = l.resena_id
+        WHERE l.usuario_id = $1 AND ($2::int IS NULL OR r.producto_id = $2)`,
+      [req.user.userId, productoId]
     );
-    if (resenaData.rows.length > 0 && resenaData.rows[0].usuario_id !== req.user.userId) {
-      await crearNotificacion({
-        usuario_id: resenaData.rows[0].usuario_id,
-        tipo: 'resena',
+    res.json({ success: true, ids: result.rows.map(r => r.resena_id) });
+  } catch (error) {
+    console.error('Error GET /resenas/mis-utiles:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener tus reseñas útiles' });
+  }
+});
+
+// Marcar o desmarcar una reseña como útil. La reseña se bloquea mientras se
+// alterna: dos clics seguidos no cuentan doble
+router.post('/:id/like', verifyToken, async (req, res) => {
+  const resenaId = enteroPositivo(req.params.id);
+  if (!resenaId) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
+  const userId = req.user.userId;
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const resenaData = await client.query(
+      `SELECT r.usuario_id, r.estado, p.nombre AS producto_nombre
+         FROM core.tblresenas r JOIN core.tblproductos p ON r.producto_id = p.id
+        WHERE r.id = $1 FOR UPDATE OF r`,
+      [resenaId]
+    );
+    const resena = resenaData.rows[0];
+    if (!resena || resena.estado !== 'aprobada') {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
+    }
+    if (resena.usuario_id === userId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: 'No puedes marcar como útil tu propia opinión' });
+    }
+
+    let liked;
+    let cambio = 0;
+    const quitado = await client.query('DELETE FROM core.tblresena_likes WHERE resena_id = $1 AND usuario_id = $2 RETURNING id', [resenaId, userId]);
+    if (quitado.rows.length > 0) {
+      liked = false;
+      cambio = -1;
+    } else {
+      const agregado = await client.query(
+        `INSERT INTO core.tblresena_likes (resena_id, usuario_id, created_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (resena_id, usuario_id) DO NOTHING RETURNING id`,
+        [resenaId, userId]
+      );
+      liked = true;
+      cambio = agregado.rows.length > 0 ? 1 : 0;
+    }
+    const conteo = await client.query(
+      'UPDATE core.tblresenas SET util_count = GREATEST(COALESCE(util_count, 0) + $2, 0), updated_at = NOW() WHERE id = $1 RETURNING util_count',
+      [resenaId, cambio]
+    );
+    await client.query('COMMIT');
+
+    res.json({ success: true, liked, message: liked ? 'Like agregado' : 'Like removido', util_count: conteo.rows[0].util_count });
+
+    // Después de responder: avisar al autor
+    if (liked && cambio > 0) {
+      const { crearNotificacion } = require('../services/notificacionHelper');
+      crearNotificacion({
+        usuario_id: resena.usuario_id,
+        tipo: 'sistema',
         titulo: 'Tu opinión fue útil',
-        mensaje: `A alguien le pareció útil tu reseña sobre "${resenaData.rows[0].producto_nombre}".`
+        mensaje: `A alguien le pareció útil tu reseña sobre "${resena.producto_nombre}".`
       });
     }
-
-    res.json({ success: true, liked: true, message: 'Like agregado' });
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Error POST /resenas/:id/like:', error.message);
-    res.status(500).json({ success: false, message: 'Error al dar like' });
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Error al dar like' });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -199,7 +281,7 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
       // Notificar al cliente
       try {
         const { notificarConEmail } = require('../services/notificacionHelper');
-        await notificarConEmail({ usuario_id: resena.usuario_id, tipo: 'resena', titulo: 'Pier respondió a tu reseña', mensaje: `Respondimos a tu reseña del producto "${prodInfo.rows[0]?.nombre || ''}": ${respuesta_negocio.substring(0, 100)}` });
+        await notificarConEmail({ usuario_id: resena.usuario_id, tipo: 'sistema', titulo: 'Pier respondió a tu reseña', mensaje: `Respondimos a tu reseña del producto "${prodInfo.rows[0]?.nombre || ''}": ${respuesta_negocio.substring(0, 100)}` });
       } catch (notifErr) { console.error('Error notificación respuesta:', notifErr.message); }
       return res.json({ success: true, resena });
     }
@@ -223,7 +305,7 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
     if (respuesta_negocio) {
       await crearNotificacion({
         usuario_id: resena.usuario_id,
-        tipo: 'resena',
+        tipo: 'sistema',
         titulo: 'Pier respondió a tu reseña',
         mensaje: `Pier Repostería respondió a tu opinión sobre "${productoNombre}": "${respuesta_negocio.substring(0, 80)}${respuesta_negocio.length > 80 ? '...' : ''}"`
       });
@@ -243,25 +325,30 @@ router.put('/:id/estado', verifyToken, verifyRole('empleado', 'gerencia', 'direc
   }
 });
 
-// Editar reseña propia (cliente)
+// Editar reseña propia (cliente). Misma regla que al crear: 4 o 5 estrellas
+// sin palabras inapropiadas se publica; lo demás vuelve a revisión
 router.put('/:id', verifyToken, async (req, res) => {
   try {
-    const { rating, titulo, comentario } = req.body;
-    if (!rating || !comentario) return res.status(400).json({ success: false, message: 'Rating y comentario son requeridos' });
+    const resenaId = enteroPositivo(req.params.id);
+    if (!resenaId) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
+    const datos = validarResena(req.body);
+    if (datos.error) return res.status(400).json({ success: false, message: datos.error });
+    const { calificacion, titulo, comentario } = datos;
     // Verificar que la reseña pertenece al usuario
-    const resena = await pool.query('SELECT id, usuario_id FROM core.tblresenas WHERE id = $1', [req.params.id]);
+    const resena = await pool.query('SELECT id, usuario_id FROM core.tblresenas WHERE id = $1', [resenaId]);
     if (resena.rows.length === 0) return res.status(404).json({ success: false, message: 'Reseña no encontrada' });
     if (resena.rows[0].usuario_id !== req.user.userId) return res.status(403).json({ success: false, message: 'No puedes editar esta reseña' });
 
-    const texto = `${titulo || ''} ${comentario}`.toLowerCase();
-    const tieneInapropiado = PALABRAS_INAPROPIADAS.some(p => texto.includes(p));
-    const nuevoEstado = tieneInapropiado ? 'pendiente' : 'aprobada';
+    const inapropiado = tieneInapropiado(titulo, comentario);
+    const nuevoEstado = !inapropiado && calificacion >= 4 ? 'aprobada' : 'pendiente';
 
     const result = await pool.query(
       'UPDATE core.tblresenas SET rating=$1, titulo=$2, comentario=$3, estado=$4, updated_at=NOW() WHERE id=$5 RETURNING *',
-      [rating, titulo || null, comentario, nuevoEstado, req.params.id]
+      [calificacion, titulo, comentario, nuevoEstado, resenaId]
     );
-    const mensaje = tieneInapropiado ? 'Tu reseña fue actualizada y requiere validación manual antes de publicarse' : 'Reseña actualizada';
+    const mensaje = inapropiado
+      ? 'Tu reseña fue actualizada y requiere validación manual antes de publicarse'
+      : (nuevoEstado === 'aprobada' ? 'Reseña actualizada' : 'Reseña actualizada: la revisaremos antes de publicarla');
     res.json({ success: true, resena: result.rows[0], message: mensaje });
   } catch (error) {
     console.error('Error PUT /resenas/:id:', error.message);

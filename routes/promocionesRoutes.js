@@ -35,7 +35,8 @@ async function otraPromocionActiva(productoId, excluirId) {
 }
 const mensajeCandado = (tipo) => `Ese producto ya tiene una promoción activa (${tipo}). Páusala o termínala antes de activar otra: dos a la vez duplican el cobro en el carrito.`;
 
-// Promociones activas (público)
+// Promociones activas (público). Solo las que ya empezaron: las que inician
+// en el futuro todavía no se cobran en el carrito (utils/promociones.js)
 router.get('/activas', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -43,6 +44,7 @@ router.get('/activas', async (req, res) => {
       FROM core.tblpromociones pr
       LEFT JOIN core.tblproductos p ON pr.producto_id = p.id
       WHERE pr.estado = 'activa' AND (pr.fecha_fin IS NULL OR pr.fecha_fin > NOW())
+        AND (pr.fecha_inicio IS NULL OR pr.fecha_inicio <= NOW())
       ORDER BY pr.created_at DESC
     `);
     res.json({ success: true, promociones: result.rows });

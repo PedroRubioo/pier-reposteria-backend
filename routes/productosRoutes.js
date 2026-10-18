@@ -140,15 +140,18 @@ router.get('/productos/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
+    // categoria_activa: el cliente no ofrece comprar un producto de una
+    // categoría oculta (el carrito lo rechaza). No se filtra activo: lo usan
+    // la página pública y la app
     const result = await pool.query(`
-      SELECT p.*, c.nombre AS categoria, c.id AS categoria_id,
+      SELECT p.*, c.nombre AS categoria, c.id AS categoria_id, c.activo AS categoria_activa,
         COALESCE(AVG(r.rating), 0)::NUMERIC(2,1) AS rating_promedio,
         COUNT(DISTINCT r.id)::INTEGER AS reviews
       FROM core.tblproductos p
       JOIN core.tblcategorias c ON p.categoria_id = c.id
       LEFT JOIN core.tblresenas r ON r.producto_id = p.id AND r.estado = 'aprobada'
       WHERE p.id = $1
-      GROUP BY p.id, c.nombre, c.id
+      GROUP BY p.id, c.nombre, c.id, c.activo
     `, [id]);
 
     if (result.rows.length === 0) {
@@ -181,7 +184,17 @@ router.get('/productos/:id', async (req, res) => {
       ORDER BY RANDOM() LIMIT 4
     `, [producto.categoria_id, id]);
 
-    res.json({ success: true, producto, resenas: resenas.rows, relacionados: relacionados.rows });
+    // Cuántas reseñas aprobadas hay de cada calificación (las 5 claves, aunque valgan 0)
+    const conteo = await pool.query(
+      `SELECT rating, COUNT(*)::int AS total FROM core.tblresenas WHERE producto_id = $1 AND estado = 'aprobada' GROUP BY rating`,
+      [id]
+    );
+    const distribucion = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+    for (const fila of conteo.rows) {
+      if (fila.rating >= 1 && fila.rating <= 5) distribucion[fila.rating] = fila.total; // eslint-disable-line security/detect-object-injection
+    }
+
+    res.json({ success: true, producto, resenas: resenas.rows, relacionados: relacionados.rows, distribucion });
   } catch (error) {
     console.error('Error GET /productos/:id:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener producto' });
@@ -193,14 +206,14 @@ router.get('/productos-destacados', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT p.id, p.nombre, p.descripcion, p.precio_chico, p.precio_grande,
-        p.imagen_url, p.sabor, p.tipo, p.popular,
+        p.imagen_url, p.sabor, p.tipo, p.popular, p.stock_online, p.es_nuevo,
         c.nombre AS categoria,
         COALESCE(AVG(r.rating), 0)::NUMERIC(2,1) AS rating,
         COUNT(DISTINCT r.id)::INTEGER AS reviews
       FROM core.tblproductos p
       JOIN core.tblcategorias c ON p.categoria_id = c.id
       LEFT JOIN core.tblresenas r ON r.producto_id = p.id AND r.estado = 'aprobada'
-      WHERE p.activo = true AND p.popular = true
+      WHERE p.activo = true AND p.popular = true AND c.activo = TRUE
       GROUP BY p.id, c.nombre
       ORDER BY reviews DESC LIMIT 8
     `);

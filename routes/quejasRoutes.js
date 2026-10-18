@@ -4,22 +4,44 @@ const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
+const { textoLibre, enteroPositivo } = require('../utils/validacionCliente');
 
 function generarTicket() {
   return `QJ-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
 }
 
-// Crear queja (cliente)
+// Valores de los enums (Diseno_Panel_Cliente.md §5.9)
+const TIPOS_QUEJA = ['queja', 'sugerencia', 'comentario'];
+const CATEGORIAS_QUEJA = ['producto', 'servicio', 'plataforma', 'otro'];
+const PRIORIDADES_QUEJA = ['alta', 'media', 'baja'];
+
+// Crear queja (cliente). Asunto y descripción con los topes de la app (150 y
+// 1000); el pedido, si viene, debe ser del cliente
 router.post('/', verifyToken, async (req, res) => {
   try {
     const { pedido_id, tipo, categoria, asunto, descripcion, prioridad } = req.body;
-    if (!tipo || !categoria || !asunto || !descripcion) return res.status(400).json({ success: false, message: 'Tipo, categoría, asunto y descripción son requeridos' });
+    if (!TIPOS_QUEJA.includes(tipo) || !CATEGORIAS_QUEJA.includes(categoria)) {
+      return res.status(400).json({ success: false, message: 'Tipo o categoría no válidos' });
+    }
+    const asuntoLimpio = textoLibre(asunto, { min: 1, max: 150 });
+    if (!asuntoLimpio.ok) return res.status(400).json({ success: false, message: 'Escribe el asunto (hasta 150 caracteres)' });
+    const descripcionLimpia = textoLibre(descripcion, { min: 1, max: 1000 });
+    if (!descripcionLimpia.ok) return res.status(400).json({ success: false, message: 'Escribe la descripción (hasta 1000 caracteres)' });
+
+    let pedidoId = null;
+    if (pedido_id !== undefined && pedido_id !== null && pedido_id !== '') {
+      pedidoId = enteroPositivo(pedido_id);
+      const propio = pedidoId
+        ? await pool.query('SELECT 1 FROM core.tblpedidos WHERE id = $1 AND usuario_id = $2', [pedidoId, req.user.userId])
+        : { rows: [] };
+      if (propio.rows.length === 0) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+    }
 
     const ticket = generarTicket();
     const result = await pool.query(
       `INSERT INTO core.tblquejas (ticket, usuario_id, pedido_id, tipo, categoria, asunto, descripcion, prioridad, estado, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pendiente',NOW(),NOW()) RETURNING *`,
-      [ticket, req.user.userId, pedido_id || null, tipo, categoria, asunto, descripcion, prioridad || 'media']
+      [ticket, req.user.userId, pedidoId, tipo, categoria, asuntoLimpio.valor, descripcionLimpia.valor, PRIORIDADES_QUEJA.includes(prioridad) ? prioridad : 'media']
     );
     res.status(201).json({ success: true, queja: result.rows[0], message: `Ticket ${ticket} creado` });
   } catch (error) {
@@ -28,10 +50,15 @@ router.post('/', verifyToken, async (req, res) => {
   }
 });
 
-// Mis quejas (cliente)
+// Mis quejas (cliente), con el número del pedido al que se refieren
 router.get('/mis-quejas', verifyToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM core.tblquejas WHERE usuario_id = $1 ORDER BY created_at DESC', [req.user.userId]);
+    const result = await pool.query(
+      `SELECT q.*, ped.numero AS pedido_numero
+         FROM core.tblquejas q LEFT JOIN core.tblpedidos ped ON ped.id = q.pedido_id
+        WHERE q.usuario_id = $1 ORDER BY q.created_at DESC`,
+      [req.user.userId]
+    );
     res.json({ success: true, quejas: result.rows });
   } catch (error) {
     console.error('Error GET /quejas/mis-quejas:', error.message);

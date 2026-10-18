@@ -49,6 +49,19 @@ function sanitizeObject(obj) {
   return sanitized;
 }
 
+// Rutas de escritura del cliente que validan campo por campo (ver la excepción
+// en sanitizeRequestMiddleware)
+const ESCRITURA_CLIENTE = [
+  ['POST', /^\/api\/quejas$/],
+  ['POST', /^\/api\/reembolsos$/],
+  ['POST', /^\/api\/resenas$/],
+  ['PUT', /^\/api\/resenas\/\d+$/],
+  ['POST', /^\/api\/direcciones$/],
+  ['PUT', /^\/api\/direcciones\/\d+$/],
+  ['PUT', /^\/api\/usuarios\/perfil\/actualizar$/],
+  ['POST', /^\/api\/pagos\/confirmar$/],
+];
+
 /**
  * Middleware para sanitizar req.body, req.query y req.params
  */
@@ -106,6 +119,16 @@ function sanitizeRequestMiddleware(req, res, next) {
     // acepta INSERT INTO core.*; EXPLAIN corre en solo lectura) y nunca se
     // pinta como HTML.
     if (req.path === '/api/backups/restaurar' || req.path === '/api/monitoreo/explain') {
+      return next();
+    }
+
+    // 🔧 EXCEPCIÓN: escritura del cliente (Diseno_Panel_Cliente.md §5.1). Cada
+    // ruta valida sus campos (utils/validacionCliente.js), el SQL es
+    // parametrizado, los correos escapan con he y React y la app pintan texto.
+    // Escapar aquí guardaba "O&#x27;Brien" y quitaba "$" de quejas y reseñas.
+    // PUT /api/usuarios/perfil/contrasena NO va aquí: la contraseña nueva debe
+    // transformarse igual que en el login para que este la reconozca.
+    if (ESCRITURA_CLIENTE.some(([metodo, patron]) => req.method === metodo && patron.test(req.path))) {
       return next();
     }
 

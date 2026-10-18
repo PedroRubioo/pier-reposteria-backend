@@ -1,4 +1,5 @@
 // config/passport.js
+const crypto = require('crypto');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { pool } = require('./database'); // ✅ Cambiado a PostgreSQL
@@ -72,7 +73,8 @@ passport.use(new GoogleStrategy({
         nombre: profile.name.givenName || profile.displayName.split(' ')[0],
         apellido: profile.name.familyName || profile.displayName.split(' ').slice(1).join(' ') || 'Usuario',
         email: profile.emails[0].value,
-        password: 'google-oauth-' + profile.id,
+        // Secreto aleatorio: nadie entra con correo y contraseña a una cuenta de Google
+        password: crypto.randomBytes(32).toString('hex'),
         telefono: '0000000000'
       };
       
@@ -191,7 +193,8 @@ passport.use('google-alexa', new GoogleStrategy({
       // Nuevo usuario
       const nombre = profile.name?.givenName || profile.displayName?.split(' ')[0] || 'Usuario';
       const apellido = profile.name?.familyName || profile.displayName?.split(' ').slice(1).join(' ') || 'Usuario';
-      const password_hash = await Usuario.hashPassword('google-oauth-' + profile.id);
+      // Secreto aleatorio: nadie entra con correo y contraseña a una cuenta de Google
+      const password_hash = await Usuario.hashPassword(crypto.randomBytes(32).toString('hex'));
 
       const insertResult = await pool.query(
         `INSERT INTO core.tblusuarios

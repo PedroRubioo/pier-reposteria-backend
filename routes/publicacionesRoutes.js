@@ -398,7 +398,8 @@ router.get('/feed', PUEDE_LEER, async (req, res) => {
 // ── Promociones para intercalar: vigentes, una por producto y con el precio que se cobra ──
 router.get('/promociones', PUEDE_LEER, async (req, res) => {
   try {
-    // Solo productos que hoy se pueden comprar; de cada uno, la promoción más reciente
+    // Solo productos que hoy se pueden comprar; de cada uno, la promoción que
+    // se cobra: la de mayor descuento y, si empatan, la más reciente (utils/promociones.js)
     const { rows } = await pool.query(
       `SELECT * FROM (
          SELECT DISTINCT ON (pr.producto_id)
@@ -413,7 +414,7 @@ router.get('/promociones', PUEDE_LEER, async (req, res) => {
            AND (pr.fecha_inicio IS NULL OR pr.fecha_inicio <= NOW())
            AND (pr.fecha_fin IS NULL OR pr.fecha_fin > NOW())
            AND p.activo AND c.activo AND p.stock_online > 0
-         ORDER BY pr.producto_id, pr.created_at DESC, pr.id DESC
+         ORDER BY pr.producto_id, pr.descuento_porcentaje DESC NULLS LAST, pr.created_at DESC, pr.id DESC
        ) vigentes
        ORDER BY vigentes.created_at DESC, vigentes.id DESC`
     );

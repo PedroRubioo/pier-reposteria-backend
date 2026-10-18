@@ -3,6 +3,9 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
+const { PERIODOS, resumenDelPeriodo, reporteVentas } = require('../utils/ventasReportes');
+const { diaHuejutla, sumarDias, diasEntre } = require('../utils/fechasHuejutla');
 
 // Listar vistas disponibles
 router.get('/vistas', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
@@ -210,6 +213,45 @@ router.get('/actividad-equipo', verifyToken, verifyRole('gerencia', 'direccion_g
   } catch (error) {
     console.error('Error GET /reportes/actividad-equipo:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener la actividad del equipo' });
+  }
+});
+
+// ── Resumen y reporte de ventas (Diseno_Panel_Direccion.md §4.1 y §4.2) ──
+// Las definiciones están en utils/ventasReportes.js. El rol se lee de la
+// base en cada petición, no del JWT.
+const VENTAS_ACCESO = accesoVigente(['gerencia', 'direccion_general']);
+const RANGO_MAXIMO_DIAS = 366;
+
+// ?periodo=mes|trimestre|anio (mes si no se envía)
+router.get('/resumen', VENTAS_ACCESO, async (req, res) => {
+  try {
+    const periodo = enviado(req.query.periodo) ? req.query.periodo : 'mes';
+    if (!PERIODOS.includes(periodo)) {
+      return res.status(400).json({ success: false, message: 'Periodo inválido: usa mes, trimestre o anio' });
+    }
+    res.json({ success: true, ...(await resumenDelPeriodo(periodo)) });
+  } catch (error) {
+    console.error('Error GET /reportes/resumen:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener el resumen' });
+  }
+});
+
+// ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD (por defecto, los últimos 30 días)
+router.get('/ventas', VENTAS_ACCESO, async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    if (enviado(desde) && !esFecha(desde)) return res.status(400).json({ success: false, message: 'Fecha "desde" inválida: usa el formato AAAA-MM-DD' });
+    if (enviado(hasta) && !esFecha(hasta)) return res.status(400).json({ success: false, message: 'Fecha "hasta" inválida: usa el formato AAAA-MM-DD' });
+    const fin = enviado(hasta) ? hasta : diaHuejutla();
+    const inicio = enviado(desde) ? desde : sumarDias(fin, -29);
+    if (inicio > fin) return res.status(400).json({ success: false, message: 'La fecha "desde" no puede ser posterior a "hasta"' });
+    if (diasEntre(inicio, fin) > RANGO_MAXIMO_DIAS) {
+      return res.status(400).json({ success: false, message: `El rango máximo es de ${RANGO_MAXIMO_DIAS} días` });
+    }
+    res.json({ success: true, ...(await reporteVentas(inicio, fin)) });
+  } catch (error) {
+    console.error('Error GET /reportes/ventas:', error.message);
+    res.status(500).json({ success: false, message: 'Error al obtener el reporte de ventas' });
   }
 });
 

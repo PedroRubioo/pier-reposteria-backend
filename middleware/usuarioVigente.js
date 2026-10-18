@@ -1,10 +1,12 @@
 // middleware/usuarioVigente.js — Usuario vigente en cada petición
 //
 // Va después de verifyToken. Relee al usuario de la base para que valgan
-// su rol y su estado actuales, no los que quedaron dentro del JWT. Lo usa
-// el feed del inicio (routes/publicacionesRoutes.js); comandas tiene la
-// misma lógica y puede importarlo de aquí.
+// su rol y su estado actuales, no los que quedaron dentro del JWT. Lo usan
+// el feed del inicio, el Editor del sitio y, con accesoVigente, Reportes de
+// ventas, Estado del sistema, Respaldos y el alta de personal; comandas
+// tiene la misma lógica y puede importarlo de aquí.
 const { pool } = require('../config/database');
+const { verifyToken } = require('./auth');
 
 /** Id de base de datos: entero positivo que cabe en INTEGER */
 const esId = (n) => Number.isInteger(n) && n >= 1 && n <= 2147483647;
@@ -36,4 +38,14 @@ async function cargarUsuarioVigente(req, res, next) {
   }
 }
 
-module.exports = { cargarUsuarioVigente };
+/** Va después de cargarUsuarioVigente: deja pasar solo a esos roles */
+function exigirRol(roles) {
+  return (req, res, next) => (roles.includes(req.usuario.rol)
+    ? next()
+    : res.status(403).json({ success: false, message: 'No tienes permisos para acceder a este recurso' }));
+}
+
+/** Token, usuario vigente y rol de la base, en ese orden (para router.get(ruta, accesoVigente([...]), ...)) */
+const accesoVigente = (roles) => [verifyToken, cargarUsuarioVigente, exigirRol(roles)];
+
+module.exports = { cargarUsuarioVigente, accesoVigente };

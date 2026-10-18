@@ -1,12 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
-const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
 const { pool } = require('../config/database');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
+const { revisarRestauracion } = require('../utils/restauracionSQL');
 
 const GITHUB_REPO = 'PedroRubioo/pier-reposteria';
 const WORKFLOW_FILE = 'backup-neon.yml';
+
+// Solo Dirección General, con el rol leído de la base (no el del JWT)
+const SOLO_DIRECCION = accesoVigente(['direccion_general']);
 
 function getGitHubHeaders() {
   return {
@@ -15,7 +19,7 @@ function getGitHubHeaders() {
   };
 }
 
-router.get('/list', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.get('/list', SOLO_DIRECCION, async (req, res) => {
   try {
     const response = await axios.get(
       `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts?per_page=100`,
@@ -41,7 +45,7 @@ router.get('/list', verifyToken, verifyRole('direccion_general'), async (req, re
   }
 });
 
-router.get('/download/:id', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.get('/download/:id', SOLO_DIRECCION, async (req, res) => {
   try {
     const response = await axios({
       method: 'get',
@@ -60,7 +64,7 @@ router.get('/download/:id', verifyToken, verifyRole('direccion_general'), async 
   }
 });
 
-router.delete('/delete/:id', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.delete('/delete/:id', SOLO_DIRECCION, async (req, res) => {
   try {
     await axios.delete(
       `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts/${req.params.id}`,
@@ -77,7 +81,7 @@ router.delete('/delete/:id', verifyToken, verifyRole('direccion_general'), async
   }
 });
 
-router.post('/generar', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.post('/generar', SOLO_DIRECCION, async (req, res) => {
   try {
     await axios.post(
       `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`,
@@ -92,7 +96,7 @@ router.post('/generar', verifyToken, verifyRole('direccion_general'), async (req
   }
 });
 
-router.get('/tablas', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.get('/tablas', SOLO_DIRECCION, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT table_name FROM information_schema.tables 
@@ -114,7 +118,7 @@ router.get('/tablas', verifyToken, verifyRole('direccion_general'), async (req, 
   }
 });
 
-router.post('/backup-selectivo', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.post('/backup-selectivo', SOLO_DIRECCION, async (req, res) => {
   try {
     const { tablas } = req.body;
     if (!tablas || !Array.isArray(tablas) || tablas.length === 0) {
@@ -164,24 +168,33 @@ router.post('/backup-selectivo', verifyToken, verifyRole('direccion_general'), a
   }
 });
 
-router.post('/restaurar', verifyToken, verifyRole('direccion_general'), async (req, res) => {
+router.post('/restaurar', SOLO_DIRECCION, async (req, res) => {
   try {
     const { sql } = req.body;
     if (!sql || typeof sql !== 'string' || sql.trim().length === 0) {
       return res.status(400).json({ success: false, message: 'El contenido SQL es requerido' });
     }
-    const sqlLower = sql.toLowerCase();
-    if (sqlLower.includes('drop database') || sqlLower.includes('drop schema')) {
-      return res.status(403).json({ success: false, message: 'No se permite DROP DATABASE ni DROP SCHEMA' });
-    }
+    // Solo INSERT INTO core.<tabla> (más BEGIN, COMMIT y SET, que no se ejecutan)
+    const revision = revisarRestauracion(sql);
+    if (revision.error) return res.status(400).json({ success: false, message: revision.error });
+    const tablasCore = await pool.query(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'core' AND table_type = 'BASE TABLE'`
+    );
+    const existentes = new Set(tablasCore.rows.map(r => r.table_name));
+    const desconocida = revision.inserciones.find(s => !existentes.has(s.tabla));
+    if (desconocida) return res.status(400).json({ success: false, message: `La tabla core.${desconocida.tabla} no existe` });
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(sql);
+      // Las comillas se leen como en la revisión: la barra invertida es texto
+      await client.query('SET LOCAL standard_conforming_strings = on');
+      const resultado = await client.query(revision.inserciones.map(s => s.texto).join(';\n'));
       await client.query('COMMIT');
+      const filas = (Array.isArray(resultado) ? resultado : [resultado]).reduce((suma, r) => suma + (r.rowCount || 0), 0);
       // Solo el tamaño: el SQL completo jamás va a la bitácora
-      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Restauró respaldo', entidad: 'backup', entidad_id: null, detalles: `${sql.length} caracteres de SQL`, ip: req.ip });
-      res.json({ success: true, message: 'Backup restaurado exitosamente' });
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Restauró respaldo', entidad: 'backup', entidad_id: null, detalles: `${sql.length} caracteres de SQL · ${revision.inserciones.length} sentencias INSERT · ${filas} registros`, ip: req.ip });
+      res.json({ success: true, message: `Respaldo restaurado: ${filas} registro${filas === 1 ? '' : 's'} insertado${filas === 1 ? '' : 's'}` });
     } catch (queryError) {
       await client.query('ROLLBACK');
       registrarAuditoria({ usuario_id: req.user.userId, accion: 'Falló restauración de respaldo', entidad: 'backup', entidad_id: null, detalles: `${sql.length} caracteres de SQL · ${recortar(queryError.message, 80)}`, ip: req.ip });

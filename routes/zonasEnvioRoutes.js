@@ -12,6 +12,31 @@ async function contarColonias(client, zonaId) {
 }
 const textoColonias = n => `${n} colonia${n === 1 ? '' : 's'}`;
 
+// Colonias del cuerpo: solo textos, sin vacías y sin repetir (sin distinguir
+// mayúsculas, igual que el índice único de la tabla)
+function coloniasLimpias(colonias) {
+  const vistas = new Map();
+  for (const colonia of colonias) {
+    const limpia = typeof colonia === 'string' ? colonia.trim() : '';
+    if (limpia && !vistas.has(limpia.toLowerCase())) vistas.set(limpia.toLowerCase(), limpia);
+  }
+  return [...vistas.values()];
+}
+
+// Si alguna colonia ya está en otra zona, el mensaje dice en cuál (null si no)
+async function coloniaEnOtraZona(db, colonias, zonaId) {
+  if (colonias.length === 0) return null;
+  const { rows } = await db.query(`
+    SELECT zc.colonia, z.nombre AS zona
+    FROM core.tblzonas_colonias zc
+    JOIN core.tblzonas_envio z ON z.id = zc.zona_id
+    WHERE LOWER(zc.colonia) = ANY($1::text[]) AND zc.zona_id IS DISTINCT FROM $2::int
+    ORDER BY zc.colonia LIMIT 1
+  `, [colonias.map(c => c.toLowerCase()), zonaId]);
+  return rows[0] ? `La colonia "${rows[0].colonia}" ya pertenece a la zona "${rows[0].zona}"` : null;
+}
+const MSG_COLONIA_REPETIDA = 'Una de las colonias o comunidades ya pertenece a otra zona';
+
 // ── Cotizar envío por colonia (público: se usa en el checkout) ──
 router.get('/cotizar', async (req, res) => {
   try {
@@ -71,47 +96,56 @@ router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async 
 
 // ── Crear zona (dirección) ──
 router.post('/', verifyToken, verifyRole('direccion_general'), async (req, res) => {
-  const client = await pool.connect();
+  const { nombre, tarifa, colonias } = req.body;
+  const lista = Array.isArray(colonias) ? coloniasLimpias(colonias) : [];
+  let client;
   try {
-    const { nombre, tarifa, colonias } = req.body;
-    if (!nombre || tarifa === undefined || isNaN(parseFloat(tarifa)) || parseFloat(tarifa) < 0) {
+    if (!nombre || typeof nombre !== 'string' || tarifa === undefined || isNaN(parseFloat(tarifa)) || parseFloat(tarifa) < 0) {
       return res.status(400).json({ success: false, message: 'Nombre y tarifa válida son requeridos' });
     }
+    client = await pool.connect();
     await client.query('BEGIN');
+    const choque = await coloniaEnOtraZona(client, lista, null);
+    if (choque) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: choque });
+    }
     const zonaResult = await client.query(
       'INSERT INTO core.tblzonas_envio (nombre, tarifa, created_at, updated_at) VALUES ($1, $2, NOW(), NOW()) RETURNING *',
       [nombre.trim(), parseFloat(tarifa)]
     );
     const zona = zonaResult.rows[0];
-    if (Array.isArray(colonias)) {
-      for (const colonia of colonias) {
-        if (colonia && colonia.trim()) {
-          await client.query('INSERT INTO core.tblzonas_colonias (zona_id, colonia) VALUES ($1, $2)', [zona.id, colonia.trim()]);
-        }
-      }
+    for (const colonia of lista) {
+      await client.query('INSERT INTO core.tblzonas_colonias (zona_id, colonia) VALUES ($1, $2)', [zona.id, colonia]);
     }
     const totalColonias = await contarColonias(client, zona.id);
     await client.query('COMMIT');
     registrarAuditoria({ usuario_id: req.user.userId, accion: 'Creó zona de envío', entidad: 'zona_envio', entidad_id: zona.id, detalles: `"${zona.nombre}" · $${zona.tarifa} · ${textoColonias(totalColonias)}`, ip: req.ip });
     res.status(201).json({ success: true, zona, message: `Zona "${zona.nombre}" creada` });
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => {});
     if (error.code === '23505') {
-      return res.status(400).json({ success: false, message: 'Una de las colonias o comunidades ya pertenece a otra zona' });
+      // Otra zona tomó la colonia mientras tanto
+      const choque = await coloniaEnOtraZona(pool, lista, null).catch(() => null);
+      return res.status(400).json({ success: false, message: choque || MSG_COLONIA_REPETIDA });
     }
     console.error('Error POST /zonas-envio:', error.message);
     res.status(500).json({ success: false, message: 'Error al crear zona' });
-  } finally { client.release(); }
+  } finally { if (client) client.release(); }
 });
 
 // ── Actualizar zona: nombre/tarifa/activa y reemplazo de colonias (dirección) ──
 router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res) => {
-  const client = await pool.connect();
+  const { nombre, tarifa, activa, colonias } = req.body;
+  const lista = Array.isArray(colonias) ? coloniasLimpias(colonias) : [];
+  if (!/^\d{1,9}$/.test(req.params.id)) return res.status(404).json({ success: false, message: 'Zona no encontrada' });
+  const zonaId = Number(req.params.id);
+  let client;
   try {
-    const { nombre, tarifa, activa, colonias } = req.body;
+    client = await pool.connect();
     await client.query('BEGIN');
     // Tarifa anterior para la bitácora, con la fila bloqueada hasta el COMMIT
-    const anterior = await client.query('SELECT tarifa FROM core.tblzonas_envio WHERE id = $1 FOR UPDATE', [req.params.id]);
+    const anterior = await client.query('SELECT tarifa FROM core.tblzonas_envio WHERE id = $1 FOR UPDATE', [zonaId]);
     const result = await client.query(`
       UPDATE core.tblzonas_envio
       SET nombre = COALESCE($1, nombre),
@@ -119,20 +153,23 @@ router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res
           activa = COALESCE($3, activa),
           updated_at = NOW()
       WHERE id = $4 RETURNING *
-    `, [nombre, tarifa !== undefined ? parseFloat(tarifa) : null, activa, req.params.id]);
+    `, [nombre, tarifa !== undefined ? parseFloat(tarifa) : null, activa, zonaId]);
     if (result.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ success: false, message: 'Zona no encontrada' });
     }
     let totalColonias = null;
     if (Array.isArray(colonias)) {
-      await client.query('DELETE FROM core.tblzonas_colonias WHERE zona_id = $1', [req.params.id]);
-      for (const colonia of colonias) {
-        if (colonia && colonia.trim()) {
-          await client.query('INSERT INTO core.tblzonas_colonias (zona_id, colonia) VALUES ($1, $2)', [req.params.id, colonia.trim()]);
-        }
+      const choque = await coloniaEnOtraZona(client, lista, zonaId);
+      if (choque) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, message: choque });
       }
-      totalColonias = await contarColonias(client, req.params.id);
+      await client.query('DELETE FROM core.tblzonas_colonias WHERE zona_id = $1', [zonaId]);
+      for (const colonia of lista) {
+        await client.query('INSERT INTO core.tblzonas_colonias (zona_id, colonia) VALUES ($1, $2)', [zonaId, colonia]);
+      }
+      totalColonias = await contarColonias(client, zonaId);
     }
     await client.query('COMMIT');
 
@@ -145,13 +182,15 @@ router.put('/:id', verifyToken, verifyRole('direccion_general'), async (req, res
     registrarAuditoria({ usuario_id: req.user.userId, accion: 'Actualizó zona de envío', entidad: 'zona_envio', entidad_id: zona.id, detalles, ip: req.ip });
     res.json({ success: true, zona, message: 'Zona actualizada' });
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => {});
     if (error.code === '23505') {
-      return res.status(400).json({ success: false, message: 'Una de las colonias o comunidades ya pertenece a otra zona' });
+      // Otra zona tomó la colonia mientras tanto
+      const choque = await coloniaEnOtraZona(pool, lista, zonaId).catch(() => null);
+      return res.status(400).json({ success: false, message: choque || MSG_COLONIA_REPETIDA });
     }
     console.error('Error PUT /zonas-envio/:id:', error.message);
     res.status(500).json({ success: false, message: 'Error al actualizar zona' });
-  } finally { client.release(); }
+  } finally { if (client) client.release(); }
 });
 
 // ── Eliminar zona (dirección; las colonias caen en cascada) ──

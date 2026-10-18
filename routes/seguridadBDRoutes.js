@@ -141,8 +141,8 @@ router.post('/probar-acceso', verifyToken, verifyRole('direccion_general'), asyn
         tabla: `core.${tabla}`,
         permitido,
         mensaje: permitido
-          ? `✅ ${rol} tiene permiso ${operacion} en core.${tabla}`
-          : `❌ ${rol} NO tiene permiso ${operacion} en core.${tabla}`
+          ? `${rol} tiene permiso ${operacion} en core.${tabla}`
+          : `${rol} no tiene permiso ${operacion} en core.${tabla}`
       }
     });
 

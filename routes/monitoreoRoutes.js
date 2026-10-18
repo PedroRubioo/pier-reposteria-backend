@@ -209,6 +209,11 @@ router.get('/indices', verifyToken, verifyRole('direccion_general'), async (req,
 // ============================================
 // EXPLAIN ANALYZE (solo SELECT - seguridad)
 // ============================================
+// Palabras completas: "created_at" ya no choca con CREATE. Las funciones
+// que cortan conexiones ajenas no las frena el modo de solo lectura.
+const PALABRAS_PROHIBIDAS = /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE|COPY|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND)\b/;
+const TIEMPO_LIMITE_EXPLAIN_MS = 5000;
+
 router.post('/explain', verifyToken, verifyRole('direccion_general'), async (req, res) => {
   const { query: userQuery } = req.body;
 
@@ -216,8 +221,14 @@ router.post('/explain', verifyToken, verifyRole('direccion_general'), async (req
     return res.status(400).json({ success: false, message: 'Query requerida' });
   }
 
+  // Una sola sentencia: un ";" de más cerraría la transacción de solo lectura
+  const consulta = userQuery.trim().replace(/;\s*$/, '');
+  if (consulta.includes(';')) {
+    return res.status(400).json({ success: false, message: 'Escribe una sola consulta, sin ";" intermedios' });
+  }
+
   // Validar que solo sea SELECT (seguridad)
-  const queryNormalizada = userQuery.trim().toUpperCase();
+  const queryNormalizada = consulta.toUpperCase();
   if (!queryNormalizada.startsWith('SELECT')) {
     return res.status(400).json({
       success: false,
@@ -226,18 +237,23 @@ router.post('/explain', verifyToken, verifyRole('direccion_general'), async (req
   }
 
   // Bloquear palabras peligrosas
-  const prohibidas = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'TRUNCATE', 'GRANT', 'REVOKE', 'EXECUTE', 'COPY'];
-  const contieneProhibida = prohibidas.some(p => queryNormalizada.includes(p));
-  if (contieneProhibida) {
+  if (PALABRAS_PROHIBIDAS.test(queryNormalizada)) {
     return res.status(400).json({
       success: false,
       message: 'La consulta contiene operaciones no permitidas'
     });
   }
 
+  // EXPLAIN ANALYZE ejecuta la consulta: va en una transacción de solo
+  // lectura, con tiempo límite, y siempre se deshace
+  let client;
   try {
-    const explainResult = await pool.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${userQuery}`);
-    const planTexto = await pool.query(`EXPLAIN (ANALYZE, BUFFERS) ${userQuery}`);
+    client = await pool.connect();
+    await client.query('BEGIN READ ONLY');
+    await client.query(`SET LOCAL statement_timeout = ${TIEMPO_LIMITE_EXPLAIN_MS}`);
+    const explainResult = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${consulta}`);
+    const planTexto = await client.query(`EXPLAIN (ANALYZE, BUFFERS) ${consulta}`);
+    await client.query('ROLLBACK');
 
     const plan = explainResult.rows[0]['QUERY PLAN'][0];
 
@@ -247,7 +263,7 @@ router.post('/explain', verifyToken, verifyRole('direccion_general'), async (req
       accion: 'EXPLAIN ANALYZE',
       entidad: 'monitoreo',
       detalles: {
-        query: userQuery.substring(0, 300),
+        query: consulta.substring(0, 300),
         tiempo_planificacion: plan['Planning Time'],
         tiempo_ejecucion: plan['Execution Time'],
         ejecutado_por: req.user.email
@@ -272,11 +288,21 @@ router.post('/explain', verifyToken, verifyRole('direccion_general'), async (req
       }
     });
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     console.error('Error en /monitoreo/explain:', error.message);
-    res.status(500).json({
+    // Un código SQLSTATE es un problema de la consulta, no del servidor
+    if (error.code === '57014') {
+      return res.status(400).json({ success: false, message: `La consulta tardó más de ${TIEMPO_LIMITE_EXPLAIN_MS / 1000} segundos y se canceló` });
+    }
+    if (error.code === '25006') {
+      return res.status(400).json({ success: false, message: 'La consulta intenta modificar datos: aquí solo se permiten lecturas' });
+    }
+    res.status(/^[0-9A-Z]{5}$/.test(error.code || '') ? 400 : 500).json({
       success: false,
       message: `Error al ejecutar EXPLAIN: ${error.message}`
     });
+  } finally {
+    if (client) client.release();
   }
 });
 

@@ -92,6 +92,15 @@ function sanitizeRequestMiddleware(req, res, next) {
       return next();
     }
 
+    // 🔧 EXCEPCIÓN: SQL de Respaldos (restaurar) y de Monitoreo (EXPLAIN).
+    // Escapar convertía ' en &#x27; y > en &gt;: ninguna sentencia con textos
+    // o comparaciones llegaba entera. Cada ruta revisa su SQL (restaurar solo
+    // acepta INSERT INTO core.*; EXPLAIN corre en solo lectura) y nunca se
+    // pinta como HTML.
+    if (req.path === '/api/backups/restaurar' || req.path === '/api/monitoreo/explain') {
+      return next();
+    }
+
     if (req.body) {
       req.body = sanitizeObject(req.body);
     }

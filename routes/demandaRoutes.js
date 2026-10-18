@@ -268,22 +268,29 @@ router.post('/clics-agotados', async (req, res) => {
   }
 });
 
+// Personas distintas que quisieron un producto agotado: cada cuenta cuenta
+// una vez; sin sesión no hay cómo distinguirlas, así que los clics anónimos
+// cuentan como una persona por día. Va dentro de un GROUP BY por producto.
+const PERSONAS_INTERESADAS = `(COUNT(DISTINCT cl.usuario_id)
+  + COUNT(DISTINCT (cl.created_at AT TIME ZONE 'America/Mexico_City')::date) FILTER (WHERE cl.usuario_id IS NULL))::int`;
+
 // Reporte: qué buscó la gente y no tuvimos
 router.get('/demanda-no-atendida', verifyToken, GERENCIA_ARRIBA, async (req, res) => {
   try {
     const dias = Math.min(parseInt(req.query.dias, 10) || 90, 365);
 
-    const [agotadosR, sinResultadoR, masBuscadoR, resumenR] = await Promise.all([
+    const [agotadosR, sinResultadoR, masBuscadoR, resumenR, perdidaR] = await Promise.all([
       pool.query(`
         SELECT p.id, p.nombre, p.precio_chico::float AS precio, p.stock_online,
                c.nombre AS categoria, COUNT(cl.id)::int AS clics,
+               ${PERSONAS_INTERESADAS} AS personas,
                MAX(cl.created_at) AS ultimo_clic
         FROM core.tblclicks_agotados cl
         JOIN core.tblproductos p ON p.id = cl.producto_id
         JOIN core.tblcategorias c ON c.id = p.categoria_id
         WHERE cl.created_at > NOW() - ($1 || ' days')::interval
         GROUP BY p.id, p.nombre, p.precio_chico, p.stock_online, c.nombre
-        ORDER BY clics DESC LIMIT 15`, [dias]),
+        ORDER BY personas DESC, clics DESC LIMIT 15`, [dias]),
       pool.query(`
         SELECT LOWER(texto) AS texto, COUNT(*)::int AS veces, MAX(created_at) AS ultima
         FROM core.tblbusquedas
@@ -300,15 +307,25 @@ router.get('/demanda-no-atendida', verifyToken, GERENCIA_ARRIBA, async (req, res
           (SELECT COUNT(*)::int FROM core.tblbusquedas WHERE num_resultados = 0 AND created_at > NOW() - ($1 || ' days')::interval) AS busquedas_sin_resultado,
           (SELECT COUNT(*)::int FROM core.tblclicks_agotados WHERE created_at > NOW() - ($1 || ' days')::interval) AS clics_agotados,
           (SELECT COUNT(*)::int FROM core.tblproductos WHERE activo = true AND stock_online = 0) AS agotados_ahora`, [dias]),
+      // Venta potencial perdida: personas distintas × precio, sobre TODOS los
+      // productos con interés (no solo los 15 de la lista)
+      pool.query(`
+        SELECT COALESCE(SUM(i.personas * i.precio), 0) AS venta_perdida
+        FROM (
+          SELECT p.precio_chico AS precio, ${PERSONAS_INTERESADAS} AS personas
+          FROM core.tblclicks_agotados cl
+          JOIN core.tblproductos p ON p.id = cl.producto_id
+          WHERE cl.created_at > NOW() - ($1 || ' days')::interval
+          GROUP BY p.id, p.precio_chico
+        ) i`, [dias]),
     ]);
 
-    // Venta potencial perdida: clics en agotados × precio del producto
-    const ventaPerdida = agotadosR.rows.reduce((suma, r) => suma + r.clics * r.precio, 0);
+    const ventaPerdida = Math.round(Number(perdidaR.rows[0].venta_perdida) * 100) / 100;
 
     res.json({
       success: true,
       dias,
-      resumen: { ...resumenR.rows[0], venta_perdida_estimada: Math.round(ventaPerdida) },
+      resumen: { ...resumenR.rows[0], venta_perdida_estimada: ventaPerdida },
       agotados: agotadosR.rows,
       sin_resultado: sinResultadoR.rows,
       mas_buscado: masBuscadoR.rows,

@@ -1,11 +1,49 @@
 // routes/usuariosRoutes.js — Gestión de usuarios (gerencia/dirección)
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { accesoVigente } = require('../middleware/usuarioVigente');
+const { isValidEmail, isValidName, isValidPhone } = require('../middleware/validation');
+const Usuario = require('../models/Usuario');
 const { registrarAuditoria } = require('../utils/auditoria');
 
 const MSG_ULTIMA_DIRECCION = 'Debe quedar al menos una cuenta de Dirección General activa';
+
+// Alta y edición de personal: solo Dirección General, con el rol leído de la base
+const SOLO_DIRECCION = accesoVigente(['direccion_general']);
+const ROLES_PERSONAL = ['empleado', 'gerencia', 'repartidor', 'hornos', 'decoracion', 'direccion_general'];
+const MAX_PUESTO = 100;
+
+// Contraseña temporal de 12 caracteres sin los que se confunden (0/O, 1/l/I)
+// y sin símbolos: el sanitizador de las peticiones los alteraría al iniciar sesión
+const CARACTERES_CONTRASENA = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function contrasenaTemporal() {
+  for (;;) {
+    let contrasena = '';
+    for (let i = 0; i < 12; i++) contrasena += CARACTERES_CONTRASENA.charAt(crypto.randomInt(CARACTERES_CONTRASENA.length));
+    if (/[a-z]/.test(contrasena) && /[A-Z]/.test(contrasena) && /\d/.test(contrasena)) return contrasena;
+  }
+}
+
+/** Puesto opcional: texto de hasta 100 caracteres; vacío = null. undefined si no es válido */
+function puestoDe(valor) {
+  if (valor === null || valor === undefined) return null;
+  if (typeof valor !== 'string') return undefined;
+  const limpio = valor.trim();
+  if (limpio === '') return null;
+  return limpio.length <= MAX_PUESTO ? limpio : undefined;
+}
+
+/** Teléfono opcional: 10 dígitos (se ignoran espacios y guiones); vacío = null. undefined si no es válido */
+function telefonoDe(valor) {
+  if (valor === null || valor === undefined) return null;
+  if (typeof valor !== 'string' && typeof valor !== 'number') return undefined;
+  const digitos = String(valor).replace(/[\s-]/g, '');
+  if (digitos === '') return null;
+  return isValidPhone(digitos) ? digitos : undefined;
+}
 
 // El :id llega como texto: se normaliza a número para compararlo con el del
 // token (si no, "0924" esquivaría la regla de "no sobre tu propia cuenta").
@@ -45,6 +83,88 @@ router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async 
   } catch (error) {
     console.error('Error GET /usuarios:', error.message);
     res.status(500).json({ success: false, message: 'Error al obtener usuarios' });
+  }
+});
+
+// Dar de alta a una persona del equipo (Diseno_Panel_Direccion.md §4.4).
+// La cuenta nace activa y con el correo verificado; la contraseña temporal
+// se devuelve una sola vez y en la base solo queda su hash.
+router.post('/', SOLO_DIRECCION, async (req, res) => {
+  try {
+    const { nombre, apellido, email, rol } = req.body;
+    const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
+    const apellidoLimpio = typeof apellido === 'string' ? apellido.trim() : '';
+    const correo = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const puesto = puestoDe(req.body.puesto);
+    const telefono = telefonoDe(req.body.telefono);
+    if (!isValidName(nombreLimpio)) return res.status(400).json({ success: false, message: 'El nombre debe tener entre 2 y 50 letras' });
+    if (!isValidName(apellidoLimpio)) return res.status(400).json({ success: false, message: 'El apellido debe tener entre 2 y 50 letras' });
+    if (!correo || correo.length > 255 || !isValidEmail(correo)) return res.status(400).json({ success: false, message: 'El correo no es válido' });
+    if (!ROLES_PERSONAL.includes(rol)) return res.status(400).json({ success: false, message: `Rol inválido. Valores: ${ROLES_PERSONAL.join(', ')}` });
+    if (puesto === undefined) return res.status(400).json({ success: false, message: `El puesto debe ser un texto de hasta ${MAX_PUESTO} caracteres` });
+    if (telefono === undefined) return res.status(400).json({ success: false, message: 'El teléfono debe tener exactamente 10 dígitos' });
+
+    const existente = await pool.query('SELECT 1 FROM core.tblusuarios WHERE LOWER(email) = $1', [correo]);
+    if (existente.rows.length > 0) return res.status(409).json({ success: false, message: 'Ya existe una cuenta con ese correo' });
+
+    const contrasena = contrasenaTemporal();
+    const passwordHash = await Usuario.hashPassword(contrasena);
+    const result = await pool.query(
+      `INSERT INTO core.tblusuarios (nombre, apellido, email, password_hash, telefono, rol, puesto, activo, email_verificado, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, TRUE, NOW(), NOW())
+       RETURNING id, nombre, apellido, email, telefono, rol::text AS rol, puesto, activo, email_verificado, created_at`,
+      [nombreLimpio, apellidoLimpio, correo, passwordHash, telefono, rol, puesto]
+    );
+    const usuario = result.rows[0];
+    registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Dio de alta a personal', entidad: 'usuario', entidad_id: usuario.id, detalles: `${usuario.nombre} ${usuario.apellido} · ${usuario.rol}`, ip: req.ip });
+    res.status(201).json({ success: true, usuario, contrasena_temporal: contrasena, message: 'Cuenta creada. Comparte la contraseña temporal: no se volverá a mostrar.' });
+  } catch (error) {
+    // Dos altas simultáneas con el mismo correo: la segunda choca con el índice único
+    if (error.code === '23505') return res.status(409).json({ success: false, message: 'Ya existe una cuenta con ese correo' });
+    console.error('Error POST /usuarios:', error.message);
+    res.status(500).json({ success: false, message: 'Error al dar de alta a la persona' });
+  }
+});
+
+// Editar puesto y teléfono de una persona del equipo. Solo cambia lo que
+// viene en el cuerpo; null o "" lo dejan vacío.
+router.put('/:id', SOLO_DIRECCION, async (req, res) => {
+  try {
+    const id = idDeRuta(req.params.id);
+    if (!id) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    const traePuesto = Object.prototype.hasOwnProperty.call(req.body, 'puesto');
+    const traeTelefono = Object.prototype.hasOwnProperty.call(req.body, 'telefono');
+    if (!traePuesto && !traeTelefono) return res.status(400).json({ success: false, message: 'Indica el puesto o el teléfono' });
+    const puesto = traePuesto ? puestoDe(req.body.puesto) : null;
+    const telefono = traeTelefono ? telefonoDe(req.body.telefono) : null;
+    if (puesto === undefined) return res.status(400).json({ success: false, message: `El puesto debe ser un texto de hasta ${MAX_PUESTO} caracteres` });
+    if (telefono === undefined) return res.status(400).json({ success: false, message: 'El teléfono debe tener exactamente 10 dígitos' });
+
+    const previo = await pool.query('SELECT nombre, apellido, rol::text AS rol, puesto, telefono FROM core.tblusuarios WHERE id = $1', [id]);
+    const antes = previo.rows[0];
+    if (!antes) return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    if (antes.rol === 'cliente') return res.status(400).json({ success: false, message: 'Solo se edita el puesto y el teléfono de las personas del equipo' });
+
+    const cambios = [];
+    if (traePuesto && puesto !== antes.puesto) cambios.push(`puesto: ${antes.puesto || 'sin puesto'} → ${puesto || 'sin puesto'}`);
+    if (traeTelefono && telefono !== antes.telefono) cambios.push(`teléfono: ${antes.telefono || 'sin teléfono'} → ${telefono || 'sin teléfono'}`);
+
+    const result = await pool.query(
+      `UPDATE core.tblusuarios
+          SET puesto = CASE WHEN $2::boolean THEN $3::varchar ELSE puesto END,
+              telefono = CASE WHEN $4::boolean THEN $5::varchar ELSE telefono END,
+              updated_at = CASE WHEN $6::boolean THEN NOW() ELSE updated_at END
+        WHERE id = $1
+        RETURNING id, nombre, apellido, email, rol::text AS rol, puesto, telefono`,
+      [id, traePuesto, puesto, traeTelefono, telefono, cambios.length > 0]
+    );
+    if (cambios.length > 0) {
+      registrarAuditoria({ usuario_id: req.usuario.id, accion: 'Editó datos de personal', entidad: 'usuario', entidad_id: id, detalles: `${antes.nombre} ${antes.apellido} · ${cambios.join(' · ')}`, ip: req.ip });
+    }
+    res.json({ success: true, usuario: result.rows[0], message: cambios.length > 0 ? 'Datos actualizados' : 'Sin cambios' });
+  } catch (error) {
+    console.error('Error PUT /usuarios/:id:', error.message);
+    res.status(500).json({ success: false, message: 'Error al actualizar los datos' });
   }
 });
 

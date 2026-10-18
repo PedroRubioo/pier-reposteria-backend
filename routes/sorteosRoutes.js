@@ -1,15 +1,16 @@
-﻿// routes/sorteosRoutes.js â€” Sorteos
+﻿// routes/sorteosRoutes.js — Sorteos
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { registrarAuditoria, recortar } = require('../utils/auditoria');
 
-// Listar sorteos (direcciÃ³n)
+// Listar sorteos (dirección)
 router.get('/', verifyToken, verifyRole('gerencia', 'direccion_general'), async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT s.*, u.nombre AS ganador_nombre, u.apellido AS ganador_apellido
+      SELECT s.*, u.nombre AS ganador_nombre, u.apellido AS ganador_apellido, u.telefono AS ganador_telefono
       FROM core.tblsorteos s
       LEFT JOIN core.tblusuarios u ON s.ganador_id = u.id
       ORDER BY s.created_at DESC
@@ -44,28 +45,32 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('gerencia', 'direccion_gene
   try {
     const sorteo = await pool.query('SELECT * FROM core.tblsorteos WHERE id = $1', [req.params.id]);
     if (sorteo.rows.length === 0) return res.status(404).json({ success: false, message: 'Sorteo no encontrado' });
-    if (sorteo.rows[0].ganador_id) return res.status(400).json({ success: false, message: 'Este sorteo ya tiene ganador' });
+    if (sorteo.rows[0].ganador_id) return res.status(409).json({ success: false, message: 'Este sorteo ya tiene ganador' });
 
+    // Cuentan los pedidos cerrados: recogidos (completado) o llevados a domicilio (entregado)
     const minPedidos = sorteo.rows[0].min_pedidos || 0;
     const participantes = await pool.query(`
-      SELECT u.id, u.nombre, u.apellido, u.email, COUNT(p.id) AS total_pedidos
+      SELECT u.id, u.nombre, u.apellido, u.email, u.telefono, COUNT(p.id) AS total_pedidos
       FROM core.tblusuarios u
-      JOIN core.tblpedidos p ON p.usuario_id = u.id AND p.estado = 'completado'
+      JOIN core.tblpedidos p ON p.usuario_id = u.id AND p.estado IN ('completado', 'entregado')
       WHERE u.rol = 'cliente' AND u.activo = true
       GROUP BY u.id
       HAVING COUNT(p.id) >= $1
+      ORDER BY u.id
     `, [minPedidos]);
 
     if (participantes.rows.length === 0) return res.status(400).json({ success: false, message: 'No hay participantes elegibles' });
 
-    // ðŸ”’ SEGURIDAD: idx es generado internamente con Math.random(), no viene del usuario
-    const idx = Math.floor(Math.random() * participantes.rows.length);
+    // 🔒 SEGURIDAD: idx sale de un generador criptográfico, no del usuario
+    const idx = crypto.randomInt(participantes.rows.length);
     const ganador = participantes.rows[idx]; // eslint-disable-line security/detect-object-injection
 
-    await pool.query(
-      'UPDATE core.tblsorteos SET ganador_id = $1, total_participantes = $2 WHERE id = $3',
-      [ganador.id, participantes.rows.length, req.params.id]
+    // Candado: solo gana el primero; una segunda ejecución simultánea no cambia nada
+    const asignado = await pool.query(
+      'UPDATE core.tblsorteos SET ganador_id = $1, total_participantes = $2 WHERE id = $3 AND ganador_id IS NULL',
+      [ganador.id, participantes.rows.length, sorteo.rows[0].id]
     );
+    if (asignado.rowCount === 0) return res.status(409).json({ success: false, message: 'Este sorteo ya tiene ganador' });
 
     // Sorteo, ganador y participantes tal como los devolvió la base
     const total = participantes.rows.length;
@@ -73,9 +78,9 @@ router.post('/:id/ejecutar', verifyToken, verifyRole('gerencia', 'direccion_gene
 
     res.json({
       success: true,
-      ganador: { id: ganador.id, nombre: ganador.nombre, apellido: ganador.apellido, email: ganador.email },
+      ganador: { id: ganador.id, nombre: ganador.nombre, apellido: ganador.apellido, email: ganador.email, telefono: ganador.telefono },
       total_participantes: participantes.rows.length,
-      message: `Â¡${ganador.nombre} ${ganador.apellido} ganÃ³ "${sorteo.rows[0].premio}"!`
+      message: `¡${ganador.nombre} ${ganador.apellido} ganó "${sorteo.rows[0].premio}"!`
     });
   } catch (error) {
     console.error('Error POST /sorteos/:id/ejecutar:', error.message);

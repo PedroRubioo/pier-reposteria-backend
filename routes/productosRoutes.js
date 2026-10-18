@@ -401,6 +401,29 @@ router.put('/categorias/:id', verifyToken, verifyRole('empleado', 'gerencia', 'd
   }
 });
 
+// "Eliminar" una categoría la desactiva (sus productos y pedidos la siguen
+// citando). Mismos permisos que su PUT.
+router.delete('/categorias/:id', verifyToken, verifyRole('empleado', 'gerencia', 'direccion_general'), async (req, res) => {
+  try {
+    if (!/^\d{1,9}$/.test(req.params.id)) return res.status(404).json({ success: false, message: 'No encontrada' });
+    const result = await pool.query(`
+      WITH previa AS (SELECT id, activo FROM core.tblcategorias WHERE id = $1 FOR UPDATE)
+      UPDATE core.tblcategorias c SET activo = false, updated_at = NOW()
+        FROM previa WHERE c.id = previa.id
+      RETURNING c.id, c.nombre, c.activo, previa.activo AS estaba_activa
+    `, [Number(req.params.id)]);
+    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'No encontrada' });
+    const { estaba_activa: estabaActiva, ...categoria } = result.rows[0];
+    if (estabaActiva) {
+      registrarAuditoria({ usuario_id: req.user.userId, accion: 'Desactivó categoría', entidad: 'categoria', entidad_id: categoria.id, detalles: `"${categoria.nombre}"`, ip: req.ip });
+    }
+    res.json({ success: true, categoria, message: `"${categoria.nombre}" desactivada` });
+  } catch (error) {
+    console.error('Error DELETE /categorias/:id:', error.message);
+    res.status(500).json({ success: false, message: 'Error al desactivar categoría' });
+  }
+});
+
 // ── Opciones por categoría (tipos y sabores dinámicos) ──
 router.get('/categoria-opciones/:categoriaId', async (req, res) => {
   try {

@@ -119,12 +119,18 @@ app.get('/api/render-health', (req, res) => {
   });
 });
 
-// Health check general
+// Health check general: 503 si la base no contesta (o tarda más de 5 s)
 app.get('/api/health', async (req, res) => {
+  let temporizador;
   try {
     // Verificar conexión a Neon
-    const dbStatus = await pool.query('SELECT NOW() as time');
-    
+    const dbStatus = await Promise.race([
+      pool.query('SELECT NOW() as time'),
+      new Promise((_, rechazar) => {
+        temporizador = setTimeout(() => rechazar(new Error('La base de datos no contestó a tiempo')), 5000);
+      }),
+    ]);
+
     res.json({
       success: true,
       status: 'healthy',
@@ -145,16 +151,20 @@ app.get('/api/health', async (req, res) => {
       }
     });
   } catch (error) {
-    res.json({
-      success: true,
+    // El detalle va al log, no a la respuesta pública
+    SecureLogger.error('Health check: la base de datos no responde', error);
+    res.status(503).json({
+      success: false,
       status: 'degraded',
+      message: 'La base de datos no responde',
       timestamp: new Date(),
       environment: process.env.NODE_ENV,
       database: {
-        connected: false,
-        error: error.message
+        connected: false
       }
     });
+  } finally {
+    clearTimeout(temporizador);
   }
 });
 
@@ -196,6 +206,7 @@ const demandaRoutes = require('./routes/demandaRoutes');
 const comandasRoutes = require('./routes/comandasRoutes');
 const publicacionesRoutes = require('./routes/publicacionesRoutes');
 const contenidoRoutes = require('./routes/contenidoRoutes');
+const sistemaRoutes = require('./routes/sistemaRoutes');
 
 
 
@@ -234,6 +245,7 @@ app.use('/api', demandaRoutes);
 app.use('/api/comandas', comandasRoutes);
 app.use('/api/publicaciones', publicacionesRoutes);
 app.use('/api/contenido', contenidoRoutes);
+app.use('/api/sistema', sistemaRoutes);
 
 
 // ========================================

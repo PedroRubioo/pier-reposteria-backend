@@ -85,6 +85,13 @@ function sanitizeRequestMiddleware(req, res, next) {
       return next();
     }
 
+    // 🔧 EXCEPCIÓN: formulario de contacto. routes/contactoRoutes.js valida
+    // campo por campo, el SQL es parametrizado, el correo escapa el HTML y
+    // React escapa al mostrar; escapar aquí ensuciaría el mensaje del cliente.
+    if (req.path === '/api/contacto' || req.path.startsWith('/api/contacto/')) {
+      return next();
+    }
+
     if (req.body) {
       req.body = sanitizeObject(req.body);
     }

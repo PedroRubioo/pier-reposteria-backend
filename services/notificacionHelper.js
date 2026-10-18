@@ -69,12 +69,15 @@ async function notificarRoles(roles, { tipo, titulo, mensaje }) {
 // ══════════════════════════════════════════════
 // ENVIAR EMAIL POR BREVO (para notificaciones importantes)
 // ══════════════════════════════════════════════
-async function enviarEmailNotificacion({ email, nombre, asunto, contenido }) {
+// responderA: { email, nombre } para que "Responder" le escriba a esa
+// persona (p. ej. el cliente del formulario de contacto). pie: cambia la
+// nota del pie. Devuelve true solo si Brevo aceptó el correo.
+async function enviarEmailNotificacion({ email, nombre, asunto, contenido, responderA, pie }) {
   try {
     // Verificar que Brevo esté configurado
     if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) {
       console.log('⚠️ Brevo no configurado, email no enviado');
-      return;
+      return false;
     }
 
     const SibApiV3Sdk = require('sib-api-v3-sdk');
@@ -87,6 +90,7 @@ async function enviarEmailNotificacion({ email, nombre, asunto, contenido }) {
 
     sendSmtpEmail.sender = { name: 'Pier Repostería', email: process.env.BREVO_SENDER_EMAIL };
     sendSmtpEmail.to = [{ email, name: nombre || '' }];
+    if (responderA && responderA.email) sendSmtpEmail.replyTo = { email: responderA.email, name: responderA.nombre || '' };
     sendSmtpEmail.subject = asunto;
     sendSmtpEmail.htmlContent = `
       <!DOCTYPE html>
@@ -119,7 +123,7 @@ async function enviarEmailNotificacion({ email, nombre, asunto, contenido }) {
           </div>
           <div class="footer">
             <p>Pier Repostería — Huejutla de Reyes, Hidalgo</p>
-            <p>Este correo fue enviado automáticamente. No responder a este email.</p>
+            <p>${pie || 'Este correo fue enviado automáticamente. No responder a este email.'}</p>
           </div>
         </div>
       </body>
@@ -128,8 +132,10 @@ async function enviarEmailNotificacion({ email, nombre, asunto, contenido }) {
 
     await apiInstance.sendTransacEmail(sendSmtpEmail);
     console.log(`📧 Email enviado a ${email}: ${asunto}`);
+    return true;
   } catch (error) {
     console.error('Error enviando email:', error.message);
+    return false;
   }
 }
 

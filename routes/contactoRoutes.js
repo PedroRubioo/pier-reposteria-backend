@@ -13,7 +13,9 @@ const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
 const { notificarRoles, enviarEmailNotificacion } = require('../services/notificacionHelper');
 
-// Las mismas opciones del formulario, con su nombre legible
+// Opciones de «tipo de producto», con su nombre legible. La web manda la
+// clave ('cafeteria') y la app Flutter la etiqueta ('Cafetería',
+// 'Información general'): las dos se normalizan a la misma clave.
 const TIPOS_PRODUCTO = new Map([
   ['pasteles', 'Pasteles'],
   ['roscas', 'Roscas'],
@@ -21,7 +23,14 @@ const TIPOS_PRODUCTO = new Map([
   ['postres', 'Postres'],
   ['cafeteria', 'Cafetería'],
   ['otro', 'Otro'],
+  // Solo en la app
+  ['informacion_general', 'Información general'],
+  ['pedidos', 'Pedidos'],
+  ['reembolsos', 'Reembolsos'],
+  ['sugerencias', 'Sugerencias'],
+  ['quejas', 'Quejas'],
 ]);
+const claveTipo = (valor) => valor.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim().replace(/\s+/g, '_');
 const ROLES_AVISO = ['direccion_general', 'gerencia', 'empleado'];
 const MENSAJE_RECIBIDO = 'Recibimos tu mensaje. Te responderemos pronto.';
 
@@ -120,7 +129,7 @@ router.post('/', async (req, res) => {
   const nombre = texto(cuerpo.nombre).replace(/\s+/g, ' ');
   const email = texto(cuerpo.email).toLowerCase();
   const telefono = texto(cuerpo.telefono).replace(/[\s().-]/g, '');
-  const tipo = texto(cuerpo.tipo_producto);
+  const tipo = claveTipo(texto(cuerpo.tipo_producto));
   const mensaje = texto(cuerpo.mensaje).replace(/\n{3,}/g, '\n\n');
 
   const errores = [];

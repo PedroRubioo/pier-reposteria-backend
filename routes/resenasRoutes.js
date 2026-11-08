@@ -49,11 +49,12 @@ router.get('/destacadas', async (req, res) => {
   }
 });
 
-// Reseñas de un producto (público)
+// Reseñas de un producto (público). usuario_id: la app reconoce las del
+// cliente sin pedir /mis-resenas
 router.get('/producto/:productoId', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT r.id, r.rating, r.titulo, r.comentario, r.fotos, r.util_count, r.verificada, r.created_at,
+      SELECT r.id, r.usuario_id, r.rating, r.titulo, r.comentario, r.fotos, r.util_count, r.verificada, r.created_at,
         u.nombre AS autor_nombre, u.apellido AS autor_apellido, r.respuesta_negocio
       FROM core.tblresenas r
       JOIN core.tblusuarios u ON r.usuario_id = u.id

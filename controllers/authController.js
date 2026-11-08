@@ -163,11 +163,13 @@ async function login(req, res) {
     const usuarioDoc = userResult.rows[0];
     const usuario = new Usuario(usuarioDoc);
 
-    if (!usuario.email_verificado) return res.status(401).json({ success: false, message: 'Verifica tu correo antes de iniciar sesión', needsVerification: true, email: usuario.email });
-    if (!usuario.activo) return res.status(403).json({ success: false, message: 'Usuario inactivo. Contacta al administrador.' });
-
+    // Primero la contraseña: con una equivocada la respuesta es la misma
+    // exista o no la cuenta, y no revela si está sin verificar o inactiva
     const passwordValido = await usuario.comparePassword(password);
     if (!passwordValido) return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
+
+    if (!usuario.email_verificado) return res.status(401).json({ success: false, message: 'Verifica tu correo antes de iniciar sesión', needsVerification: true, email: usuario.email });
+    if (!usuario.activo) return res.status(403).json({ success: false, message: 'Usuario inactivo. Contacta al administrador.' });
 
     await pool.query('UPDATE core.tblusuarios SET ultimo_acceso = NOW() WHERE id = $1', [usuarioDoc.id]);
 

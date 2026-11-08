@@ -3,12 +3,14 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const cloudinary = require('cloudinary').v2;
 const { pool } = require('../config/database');
 const { verifyToken, verifyRole } = require('../middleware/auth');
+const { tokenBlacklist } = require('../middleware/tokenBlacklist');
 const { accesoVigente } = require('../middleware/usuarioVigente');
 const { isValidEmail, isValidName, isValidPhone, isStrongPassword, getPasswordRequirementsMessage } = require('../middleware/validation');
 const Usuario = require('../models/Usuario');
-const { registrarAuditoria } = require('../utils/auditoria');
+const { registrarAuditoria, recortar } = require('../utils/auditoria');
 const { telefono10, esUrlCloudinary } = require('../utils/validacionCliente');
 
 const MSG_ULTIMA_DIRECCION = 'Debe quedar al menos una cuenta de Dirección General activa';
@@ -188,6 +190,162 @@ router.put('/perfil/contrasena', verifyToken, async (req, res) => {
   } catch (error) {
     console.error('Error PUT /usuarios/perfil/contrasena:', error.message);
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Error al cambiar la contraseña' });
+  }
+});
+
+// ══════════════════════════════════════
+// BAJA DE LA CUENTA PROPIA (cliente)
+// ══════════════════════════════════════
+// La fila no se borra: pedidos, reseñas, quejas, reembolsos y la bitácora la
+// siguen citando. Se anonimiza y se desactiva en una sola transacción: los
+// pedidos se conservan (5 años, por contabilidad) sin dirección ni notas, y
+// las reseñas, como «Cliente de Pier» y sin fotos. Las fotos se borran de
+// Cloudinary después del commit; si eso falla, se registra y la baja sigue.
+
+// Misma configuración que routes/uploadRoutes.js, comandas y el editor del sitio
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+const CLOUDINARY_LISTO = Boolean(
+  process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET
+);
+
+const ESTADOS_PEDIDO_TERMINADO = ['entregado', 'completado', 'cancelado'];
+// Lo que solo le servía a la cuenta (los códigos de verificación, aparte:
+// también se buscan por correo)
+const TABLAS_DE_LA_CUENTA = [
+  'tblcarrito_items', 'tbldirecciones', 'tblfavoritos', 'tblnotificaciones', 'tbloauth_codes',
+  'tblcodigos_vinculacion_alexa', 'tblpublicacion_comentarios', 'tblpublicacion_reacciones',
+];
+// Carpetas donde suben fotos los clientes (TIPOS_CLIENTE en uploadRoutes.js;
+// si se agrega un tipo, súmalo aquí). Las fotos de una reseña y la de perfil
+// las manda el propio cliente: solo se borra lo de estas carpetas que ya nadie
+// más cita, para que una baja no borre la foto de un producto o de otra persona
+const CARPETAS_FOTOS_CLIENTE = ['pier-reposteria/perfil/', 'pier-reposteria/reembolso/'];
+const SQL_FOTOS_SIN_OTRA_CITA = `
+  SELECT f.public_id FROM unnest($1::text[]) AS f(public_id)
+   WHERE NOT EXISTS (SELECT 1 FROM core.tblusuarios u WHERE strpos(u.avatar_url, f.public_id) > 0)
+     AND NOT EXISTS (SELECT 1 FROM core.tblresenas r WHERE strpos(r.fotos::text, f.public_id) > 0)
+     AND NOT EXISTS (SELECT 1 FROM core.tblreembolsos e WHERE strpos(e.fotos_evidencia::text, f.public_id) > 0)`;
+
+/** public_id de una foto: el del objeto { url, public_id } que devuelve la subida, o el de su URL de Cloudinary (…/upload/v123/pier-reposteria/perfil/abc.webp) */
+function publicIdDeFoto(foto) {
+  if (foto && typeof foto === 'object' && typeof foto.public_id === 'string') return foto.public_id.trim();
+  const url = typeof foto === 'string' ? foto : foto?.url;
+  if (!esUrlCloudinary(url)) return null;
+  const ruta = /\/upload\/(?:[^/]+\/)*?(pier-reposteria\/[^?#]+?)(?:\.\w+)?(?:[?#].*)?$/.exec(url);
+  return ruta ? ruta[1] : null;
+}
+const esFotoDeCliente = (id) => typeof id === 'string' && !id.includes('..') && CARPETAS_FOTOS_CLIENTE.some(c => id.startsWith(c));
+/** Cloudinary rechaza con { error: { message, http_code } } o con un Error de red */
+const errorDeCloudinary = (error) => error?.error?.message ?? error?.message ?? String(error);
+
+// Después del commit: un fallo se registra y no revierte la baja
+async function borrarFotosDeCloudinary(publicIds) {
+  if (publicIds.length === 0) return;
+  if (!CLOUDINARY_LISTO) {
+    console.error(`Baja de cuenta: Cloudinary no está configurado; ${publicIds.length} foto(s) sin borrar`);
+    return;
+  }
+  try {
+    const { rows } = await pool.query(SQL_FOTOS_SIN_OTRA_CITA, [[...new Set(publicIds)]]);
+    for (const { public_id: id } of rows) {
+      try {
+        const resultado = await cloudinary.uploader.destroy(id);
+        if (resultado.result !== 'ok' && resultado.result !== 'not found') {
+          console.error(`Baja de cuenta: Cloudinary no borró ${id}:`, resultado.result);
+        }
+      } catch (error) {
+        console.error(`Baja de cuenta: no se borró ${id} de Cloudinary:`, errorDeCloudinary(error));
+      }
+    }
+  } catch (error) {
+    console.error('Baja de cuenta: no se revisaron las fotos por borrar:', error.message);
+  }
+}
+
+router.delete('/perfil', verifyToken, async (req, res) => {
+  const userId = Number(req.user.userId);
+  const { motivo } = req.body || {};
+  let client;
+  try {
+    // El hash (lento) antes de abrir la transacción: con él ya nadie entra
+    const passwordHash = await Usuario.hashPassword(crypto.randomBytes(32).toString('hex'));
+    client = await pool.connect();
+    await client.query('BEGIN');
+    // La fila queda bloqueada: dos bajas a la vez se forman en fila
+    const cuenta = await client.query(
+      'SELECT rol::text AS rol, activo, email, avatar_url FROM core.tblusuarios WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+    const u = cuenta.rows[0];
+    if (!u || !u.activo) {
+      await client.query('ROLLBACK');
+      return res.status(401).json({ success: false, codigo: 'SESION_INVALIDA', message: 'Tu cuenta está desactivada o cambió. Inicia sesión de nuevo.' });
+    }
+    if (u.rol !== 'cliente') {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, message: 'Las cuentas del personal no se dan de baja desde aquí' });
+    }
+    const enCurso = await client.query(
+      'SELECT 1 FROM core.tblpedidos WHERE usuario_id = $1 AND estado::text <> ALL($2::text[]) LIMIT 1',
+      [userId, ESTADOS_PEDIDO_TERMINADO]
+    );
+    if (enCurso.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, codigo: 'PEDIDOS_EN_CURSO', message: 'Tienes pedidos en curso; espera a que se entreguen o cancélalos' });
+    }
+
+    // 1. Anonimizar y desactivar. El correo es UNIQUE y NOT NULL: uno que no
+    // puede existir (.invalid) deja libre el original para una cuenta nueva
+    await client.query(
+      `UPDATE core.tblusuarios
+          SET nombre = 'Cliente', apellido = 'de Pier', email = $2, password_hash = $3,
+              telefono = NULL, google_id = NULL, avatar_url = NULL,
+              activo = FALSE, email_verificado = FALSE, updated_at = NOW()
+        WHERE id = $1`,
+      [userId, `eliminado-${userId}@pierreposteria.invalid`, passwordHash]
+    );
+    // 2. Carrito, direcciones, favoritos, avisos, códigos y lo que dejó en Novedades
+    for (const tabla of TABLAS_DE_LA_CUENTA) {
+      await client.query(`DELETE FROM core.${tabla} WHERE usuario_id = $1`, [userId]);
+    }
+    await client.query('DELETE FROM core.tblcodigos_verificacion WHERE usuario_id = $1 OR LOWER(email) = LOWER($2)', [userId, u.email]);
+    // 3. Pedidos: se conservan sin dirección ni notas. La dirección es
+    // inmutable; la baja es la excepción, porque son datos personales
+    await client.query(
+      'UPDATE core.tblpedidos SET direccion_entrega = NULL, notas = NULL WHERE usuario_id = $1 AND (direccion_entrega IS NOT NULL OR notas IS NOT NULL)',
+      [userId]
+    );
+    // 4. Reseñas: la calificación y el texto se quedan; las fotos no
+    const resenas = await client.query(
+      `WITH previas AS (SELECT id, fotos FROM core.tblresenas WHERE usuario_id = $1 AND fotos IS NOT NULL FOR UPDATE)
+       UPDATE core.tblresenas r SET fotos = NULL FROM previas WHERE r.id = previas.id RETURNING previas.fotos`,
+      [userId]
+    );
+    await client.query('COMMIT');
+
+    // 5. El token de esta sesión deja de valer, igual que en el logout (los
+    // demás de la cuenta ya los rechaza verifyToken: activo = false)
+    tokenBlacklist.add(req.token, Date.now() + 7 * 24 * 60 * 60 * 1000);
+    res.json({ success: true, message: 'Tu cuenta se eliminó' });
+
+    // Después de responder: 6. bitácora, sin datos personales (ni IP), y las fotos
+    const textoMotivo = typeof motivo === 'string' ? motivo.trim() : '';
+    registrarAuditoria({
+      usuario_id: userId, accion: 'cuenta_eliminada', entidad: 'usuario', entidad_id: userId,
+      detalles: textoMotivo ? `Motivo: ${recortar(textoMotivo, 300)}` : null,
+    });
+    const fotos = [u.avatar_url, ...resenas.rows.flatMap(r => (Array.isArray(r.fotos) ? r.fotos : [r.fotos]))];
+    borrarFotosDeCloudinary(fotos.map(publicIdDeFoto).filter(esFotoDeCliente));
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    console.error('Error DELETE /usuarios/perfil:', error.message);
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'No se pudo eliminar tu cuenta' });
+  } finally {
+    if (client) client.release();
   }
 });
 

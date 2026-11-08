@@ -70,6 +70,11 @@ const { pool } = require('../config/database');
 const Usuario = require('../models/Usuario');
 const { OAuth2Client } = require('google-auth-library');
 
+// Cuenta desactivada por gerencia: no entra con Google ni se reactiva. Una
+// dada de baja ya no tiene google_id ni su correo, así que no se encuentra y
+// con la misma cuenta de Google se crea una nueva
+const CUENTA_INACTIVA = { success: false, message: 'Usuario inactivo. Contacta al administrador.' };
+
 // POST /api/auth/google/mobile
 // Recibe el idToken de google_sign_in en Flutter
 // Usa GOOGLE_CLIENT_ID_MOBILE (mismo proyecto que web, Web Client ID)
@@ -114,6 +119,7 @@ router.post('/google/mobile', async (req, res) => {
     );
 
     let usuarioDoc = result.rows[0];
+    if (usuarioDoc && !usuarioDoc.activo) return res.status(403).json(CUENTA_INACTIVA);
 
     if (usuarioDoc) {
       // Usuario existente — actualizar último acceso
@@ -129,6 +135,7 @@ router.post('/google/mobile', async (req, res) => {
         [email.toLowerCase()]
       );
       usuarioDoc = result.rows[0];
+      if (usuarioDoc && !usuarioDoc.activo) return res.status(403).json(CUENTA_INACTIVA);
 
       if (usuarioDoc) {
         // Vincular google_id al usuario existente

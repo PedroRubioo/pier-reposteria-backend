@@ -208,6 +208,7 @@ const publicacionesRoutes = require('./routes/publicacionesRoutes');
 const contenidoRoutes = require('./routes/contenidoRoutes');
 const sistemaRoutes = require('./routes/sistemaRoutes');
 const turnoRoutes = require('./routes/turnoRoutes');
+const reportesContenidoRoutes = require('./routes/reportesContenidoRoutes');
 
 
 
@@ -248,6 +249,9 @@ app.use('/api/publicaciones', publicacionesRoutes);
 app.use('/api/contenido', contenidoRoutes);
 app.use('/api/sistema', sistemaRoutes);
 app.use('/api/turno', turnoRoutes);
+// Reportes de contenido: rutas completas (/resenas/:id/reportes,
+// /publicaciones/comentarios/:id/reportes, /reportes-contenido)
+app.use('/api', reportesContenidoRoutes);
 
 
 // ========================================
